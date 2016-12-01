@@ -132,6 +132,8 @@ libostree_1_la_SOURCES = \
 	src/libostree/ostree-autocleanups.h \
 	src/libostree/ostree-json.c \
 	src/libostree/ostree-json-private.h \
+	src/libostree/ostree-json-oci.c \
+	src/libostree/ostree-json-oci-private.h \
 	$(NULL)
 if USE_LIBARCHIVE
 libostree_1_la_SOURCES += src/libostree/ostree-libarchive-input-stream.h \
