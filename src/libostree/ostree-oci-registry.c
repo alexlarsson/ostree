@@ -750,3 +750,113 @@ ostree_oci_registry_load_versioned (OstreeOciRegistry  *self,
 
   return ostree_oci_versioned_from_json (node, error);
 }
+
+static void
+test_dl_cb (GObject *source_object,
+            GAsyncResult *res,
+            gpointer user_data)
+{
+  g_autoptr(GError) local_error = NULL;
+  glnx_fd_close int fd = -1;
+
+  fd = ostree_oci_registry_download_blob_finish (OSTREE_OCI_REGISTRY (source_object), res, &local_error);
+  g_print ("test_dl_cb: %d\n", fd);
+  if (fd == -1)
+    g_print ("error: %s\n", local_error->message);
+
+  g_main_loop_quit ((GMainLoop*) user_data);
+}
+
+extern void ostree_oci_registry_test (void);
+void
+ostree_oci_registry_test (void)
+{
+  glnx_fd_close int local_dfd = -1;
+  g_autoptr(OstreeOciRegistry) registry = NULL;
+  g_autoptr(OstreeOciRegistry) registry2 = NULL;
+  g_autoptr(OstreeOciRef) ref = NULL;
+  g_autoptr(OstreeOciRef) ref2 = NULL;
+  g_autoptr(OstreeOciVersioned) versioned = NULL;
+  g_autoptr(OstreeOciVersioned) versioned2 = NULL;
+  g_autoptr(GError) local_error = NULL;
+  g_autoptr(GBytes) bytes = NULL;
+  g_autofree char *digest = NULL;
+
+  if (!glnx_opendirat (AT_FDCWD, "/tmp", TRUE, &local_dfd, &local_error))
+    { g_print ("error: %s\n", local_error->message); return; }
+
+  registry = ostree_oci_registry_new ("file:///vcs/gnome/flatpak/oci-dir", TRUE, local_dfd, NULL, &local_error);
+  if (registry == NULL)
+    { g_print ("error: %s\n", local_error->message); return; }
+
+  ref = ostree_oci_registry_load_ref (registry, "latest", NULL, &local_error);
+  if (ref == NULL)
+    { g_print ("error: %s\n", local_error->message); return; }
+
+  {
+    g_autoptr(JsonNode) node = ostree_json_to_node (OSTREE_JSON (ref));
+    g_autofree char *str = json_to_string (node, TRUE);
+    g_print ("ref:\n%s\n", str);
+  }
+
+  versioned = ostree_oci_registry_load_versioned (registry, ref->descriptor.digest, NULL, &local_error);
+  if (versioned == NULL)
+    { g_print ("error: %s\n", local_error->message); return; }
+
+  {
+    g_autoptr(JsonNode) node = ostree_json_to_node (OSTREE_JSON (versioned));
+    g_autofree char *str = json_to_string (node, TRUE);
+    g_print ("versioned:\n%s\n", str);
+  }
+
+  bytes = ostree_json_to_bytes (OSTREE_JSON (versioned));
+  digest = ostree_oci_registry_store_blob (registry, bytes, NULL, &local_error);
+  if (digest == NULL)
+    { g_print ("error: %s\n", local_error->message); return; }
+
+  ref2 = ostree_oci_ref_new (ref->descriptor.mediatype, digest, g_bytes_get_size (bytes));
+
+  if (!ostree_oci_registry_set_ref (registry, "not-latest", ref2, NULL, &local_error))
+    { g_print ("error: %s\n", local_error->message); return; }
+
+  {
+    g_autoptr(GMainContext) mainctx = g_main_context_new ();
+    g_autoptr(GMainLoop) loop = g_main_loop_new (mainctx, FALSE);
+
+    g_main_context_push_thread_default (mainctx);
+
+    ostree_oci_registry_download_blob (registry, ref->descriptor.digest, NULL, test_dl_cb, loop);
+
+    g_main_loop_run (loop);
+
+    g_main_context_pop_thread_default (mainctx);
+  }
+
+  registry2 = ostree_oci_registry_new ("http://127.0.0.1/oci", FALSE, local_dfd, NULL, &local_error);
+  if (registry2 == NULL)
+    { g_print ("error: %s\n", local_error->message); return; }
+
+  versioned2 = ostree_oci_registry_load_versioned (registry2, ref->descriptor.digest, NULL, &local_error);
+  if (versioned2 == NULL)
+    { g_print ("error: %s\n", local_error->message); return; }
+
+  {
+    g_autoptr(JsonNode) node = ostree_json_to_node (OSTREE_JSON (versioned));
+    g_autofree char *str = json_to_string (node, TRUE);
+    g_print ("versioned2:\n%s\n", str);
+  }
+
+  {
+    g_autoptr(GMainContext) mainctx = g_main_context_new ();
+    g_autoptr(GMainLoop) loop = g_main_loop_new (mainctx, FALSE);
+
+    g_main_context_push_thread_default (mainctx);
+
+    ostree_oci_registry_download_blob (registry2, ref->descriptor.digest, NULL, test_dl_cb, loop);
+
+    g_main_loop_run (loop);
+
+    g_main_context_pop_thread_default (mainctx);
+  }
+
+}

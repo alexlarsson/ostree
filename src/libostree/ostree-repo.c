@@ -3650,6 +3650,8 @@ ostree_repo_list_commit_objects_starting_with (OstreeRepo                  *self
   return ret;
 }
 
+extern void ostree_oci_registry_test (void);
+
 /**
  * ostree_repo_read_commit:
  * @self: Repo
@@ -3673,6 +3675,8 @@ ostree_repo_read_commit (OstreeRepo   *self,
   g_autoptr(GFile) ret_root = NULL;
   g_autofree char *resolved_commit = NULL;
 
+  ostree_oci_registry_test ();
+  
   if (!ostree_repo_resolve_rev (self, ref, FALSE, &resolved_commit, error))
     goto out;
 
