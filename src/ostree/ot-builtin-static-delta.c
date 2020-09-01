@@ -48,6 +48,8 @@ BUILTINPROTO(show);
 BUILTINPROTO(delete);
 BUILTINPROTO(generate);
 BUILTINPROTO(apply_offline);
+BUILTINPROTO(indexes);
+BUILTINPROTO(reindex);
 
 #undef BUILTINPROTO
 
@@ -67,6 +69,12 @@ static OstreeCommand static_delta_subcommands[] = {
   { "apply-offline", OSTREE_BUILTIN_FLAG_NONE,
     ot_static_delta_builtin_apply_offline,
     "Apply static delta file" },
+  { "indexes", OSTREE_BUILTIN_FLAG_NONE,
+    ot_static_delta_builtin_indexes,
+    "List static delta indexes" },
+  { "reindex", OSTREE_BUILTIN_FLAG_NONE,
+    ot_static_delta_builtin_reindex,
+    "Regenerate static delta indexes" },
   { NULL, 0, NULL, NULL }
 };
 
@@ -96,6 +104,15 @@ static GOptionEntry apply_offline_options[] = {
 };
 
 static GOptionEntry list_options[] = {
+  { NULL }
+};
+
+static GOptionEntry indexes_options[] = {
+  { NULL }
+};
+
+static GOptionEntry reindex_options[] = {
+  { "to", 0, 0, G_OPTION_ARG_STRING, &opt_to_rev, "Only update delta index to revision REV", "REV" },
   { NULL }
 };
 
@@ -148,6 +165,46 @@ ot_static_delta_builtin_list (int argc, char **argv, OstreeCommandInvocation *in
 
   return TRUE;
 }
+
+static gboolean
+ot_static_delta_builtin_indexes (int argc, char **argv, OstreeCommandInvocation *invocation, GCancellable *cancellable, GError **error)
+{
+  g_autoptr(OstreeRepo) repo = NULL;
+  g_autoptr(GOptionContext) context = g_option_context_new ("");
+  if (!ostree_option_context_parse (context, indexes_options, &argc, &argv,
+                                    invocation, &repo, cancellable, error))
+    return FALSE;
+
+  g_autoptr(GPtrArray) indexes = NULL;
+  if (!ostree_repo_list_static_delta_indexes (repo, &indexes, cancellable, error))
+    return FALSE;
+
+  if (indexes->len == 0)
+    g_print ("(No static deltas indexes)\n");
+  else
+    {
+      for (guint i = 0; i < indexes->len; i++)
+        g_print ("%s\n", (char*)indexes->pdata[i]);
+    }
+
+  return TRUE;
+}
+
+static gboolean
+ot_static_delta_builtin_reindex (int argc, char **argv, OstreeCommandInvocation *invocation, GCancellable *cancellable, GError **error)
+{
+  g_autoptr(GOptionContext) context = g_option_context_new ("");
+
+  g_autoptr(OstreeRepo) repo = NULL;
+  if (!ostree_option_context_parse (context, reindex_options, &argc, &argv, invocation, &repo, cancellable, error))
+    return FALSE;
+
+  if (!ostree_cmd__private__ ()->ostree_static_delta_reindex (repo, opt_to_rev, cancellable, error))
+    return FALSE;
+
+  return TRUE;
+}
+
 
 static gboolean
 ot_static_delta_builtin_show (int argc, char **argv, OstreeCommandInvocation *invocation, GCancellable *cancellable, GError **error)
