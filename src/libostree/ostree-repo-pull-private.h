@@ -74,7 +74,8 @@ typedef struct {
   GBytes           *summary_data;
   GBytes           *summary_data_sig;
   GVariant         *summary;
-  GHashTable       *summary_deltas_checksums;
+  GHashTable       *summary_deltas_checksums; /* Filled from summary and delta indexes */
+  gboolean          summary_has_deltas; /* True if the summary existed and had a delta index */
   GHashTable       *ref_original_commits; /* Maps checksum to commit, used by timestamp checks */
   GHashTable       *verified_commits; /* Set<checksum> of commits that have been verified */
   GHashTable       *signapi_verified_commits; /* Map<checksum,verification> of commits that have been signapi verified */
@@ -89,6 +90,7 @@ typedef struct {
   GHashTable       *requested_fallback_content; /* Maps checksum to itself */
   GHashTable       *pending_fetch_metadata; /* Map<ObjectName,FetchObjectData> */
   GHashTable       *pending_fetch_content; /* Map<checksum,FetchObjectData> */
+  GHashTable       *pending_fetch_delta_indexes; /* Set<FetchDeltaIndexData> */
   GHashTable       *pending_fetch_delta_superblocks; /* Set<FetchDeltaSuperData> */
   GHashTable       *pending_fetch_deltaparts; /* Set<FetchStaticDeltaData> */
   guint             n_outstanding_metadata_fetches;
