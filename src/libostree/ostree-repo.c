@@ -5720,6 +5720,177 @@ summary_add_ref_entry (OstreeRepo               *self,
 }
 
 
+static GVariant *
+generate_summary (OstreeRepo               *self,
+                  GVariant                 *additional_metadata,
+                  gboolean                  include_deltas,
+                  gboolean                  new_commit_timestamp_key,
+                  OstreeAddMetadataCallback metadata_callback,
+                  gpointer                  user_data,
+                  GCancellable             *cancellable,
+                  GError                  **error)
+{
+  g_auto(GVariantDict) additional_metadata_builder = OT_VARIANT_BUILDER_INITIALIZER;
+  g_variant_dict_init (&additional_metadata_builder, additional_metadata);
+  g_autoptr(GVariantBuilder) refs_builder = g_variant_builder_new (G_VARIANT_TYPE ("a(s(taya{sv}))"));
+
+  const gchar *main_collection_id = ostree_repo_get_collection_id (self);
+
+  {
+    if (main_collection_id == NULL)
+      {
+        g_autoptr(GHashTable) refs = NULL;
+        if (!ostree_repo_list_refs (self, NULL, &refs, cancellable, error))
+          return NULL;
+
+        g_autoptr(GList) ordered_keys = g_hash_table_get_keys (refs);
+        ordered_keys = g_list_sort (ordered_keys, (GCompareFunc)strcmp);
+
+        for (GList *iter = ordered_keys; iter; iter = iter->next)
+          {
+            const char *ref = iter->data;
+            const char *commit = g_hash_table_lookup (refs, ref);
+
+            if (!summary_add_ref_entry (self, NULL, ref, commit, refs_builder, new_commit_timestamp_key, metadata_callback, user_data, error))
+              return NULL;
+          }
+      }
+  }
+
+
+  if (include_deltas)
+    {
+      g_autoptr(GPtrArray) delta_names = NULL;
+      g_auto(GVariantDict) deltas_builder = OT_VARIANT_BUILDER_INITIALIZER;
+
+      if (!ostree_repo_list_static_delta_names (self, &delta_names, cancellable, error))
+        return NULL;
+
+      g_variant_dict_init (&deltas_builder, NULL);
+      for (guint i = 0; i < delta_names->len; i++)
+        {
+          g_autofree char *from = NULL;
+          g_autofree char *to = NULL;
+          GVariant *digest;
+
+          if (!_ostree_parse_delta_name (delta_names->pdata[i], &from, &to, error))
+            return NULL;
+
+          digest = _ostree_repo_static_delta_superblock_digest (self,
+                                                                (from && from[0]) ? from : NULL,
+                                                                to, cancellable, error);
+          if (digest == NULL)
+            return NULL;
+
+          g_variant_dict_insert_value (&deltas_builder, delta_names->pdata[i], digest);
+        }
+
+      if (delta_names->len > 0)
+        g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_STATIC_DELTAS, g_variant_dict_end (&deltas_builder));
+    }
+
+  {
+    g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_LAST_MODIFIED,
+                                 g_variant_new_uint64 (GUINT64_TO_BE (g_get_real_time () / G_USEC_PER_SEC)));
+  }
+
+  /* Add refs which have a collection specified, which could be in refs/mirrors,
+   * refs/heads, and/or refs/remotes. */
+  {
+    g_autoptr(GHashTable) collection_refs = NULL;
+    if (!ostree_repo_list_collection_refs (self, NULL, &collection_refs,
+                                           OSTREE_REPO_LIST_REFS_EXT_NONE, cancellable, error))
+      return NULL;
+
+    gsize collection_map_size = 0;
+    GHashTableIter iter;
+    g_autoptr(GHashTable) collection_map = NULL;  /* (element-type utf8 GHashTable) */
+    g_hash_table_iter_init (&iter, collection_refs);
+    collection_map = g_hash_table_new_full (g_str_hash, g_str_equal, NULL,
+                                            (GDestroyNotify) g_hash_table_unref);
+
+    const OstreeCollectionRef *ref;
+    const char *checksum;
+    while (g_hash_table_iter_next (&iter, (gpointer *) &ref, (gpointer *) &checksum))
+      {
+        GHashTable *ref_map = g_hash_table_lookup (collection_map, ref->collection_id);
+
+        if (ref_map == NULL)
+          {
+            ref_map = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, NULL);
+            g_hash_table_insert (collection_map, ref->collection_id, ref_map);
+          }
+
+        g_hash_table_insert (ref_map, ref->ref_name, (gpointer) checksum);
+      }
+
+    g_autoptr(GVariantBuilder) collection_refs_builder = g_variant_builder_new (G_VARIANT_TYPE ("a{sa(s(taya{sv}))}"));
+
+    g_autoptr(GList) ordered_collection_ids = g_hash_table_get_keys (collection_map);
+    ordered_collection_ids = g_list_sort (ordered_collection_ids, (GCompareFunc) strcmp);
+
+    for (GList *collection_iter = ordered_collection_ids; collection_iter; collection_iter = collection_iter->next)
+      {
+        const char *collection_id = collection_iter->data;
+        GHashTable *ref_map = g_hash_table_lookup (collection_map, collection_id);
+
+        /* We put the local repo's collection ID in the main refs map, rather
+         * than the collection map, for backwards compatibility. */
+        gboolean is_main_collection_id = (main_collection_id != NULL && g_str_equal (collection_id, main_collection_id));
+
+        if (!is_main_collection_id)
+          {
+            g_variant_builder_open (collection_refs_builder, G_VARIANT_TYPE ("{sa(s(taya{sv}))}"));
+            g_variant_builder_add (collection_refs_builder, "s", collection_id);
+            g_variant_builder_open (collection_refs_builder, G_VARIANT_TYPE ("a(s(taya{sv}))"));
+          }
+
+        g_autoptr(GList) ordered_refs = g_hash_table_get_keys (ref_map);
+        ordered_refs = g_list_sort (ordered_refs, (GCompareFunc) strcmp);
+
+        for (GList *ref_iter = ordered_refs; ref_iter != NULL; ref_iter = ref_iter->next)
+          {
+            const char *ref = ref_iter->data;
+            const char *commit = g_hash_table_lookup (ref_map, ref);
+            GVariantBuilder *builder = is_main_collection_id ? refs_builder : collection_refs_builder;
+
+            if (!summary_add_ref_entry (self, collection_id, ref, commit, builder, new_commit_timestamp_key, metadata_callback, user_data, error))
+              return NULL;
+
+            if (!is_main_collection_id)
+              collection_map_size++;
+          }
+
+        if (!is_main_collection_id)
+          {
+            g_variant_builder_close (collection_refs_builder);  /* array */
+            g_variant_builder_close (collection_refs_builder);  /* dict entry */
+          }
+      }
+
+    if (main_collection_id != NULL)
+      g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_COLLECTION_ID,
+                                   g_variant_new_string (main_collection_id));
+    if (collection_map_size > 0)
+      g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_COLLECTION_MAP,
+                                   g_variant_builder_end (collection_refs_builder));
+  }
+
+  if (metadata_callback != NULL &&
+      !metadata_callback (self, 0, NULL, NULL, NULL,
+                          &additional_metadata_builder, user_data, error))
+    return NULL;
+
+  g_autoptr(GVariantBuilder) summary_builder =
+    g_variant_builder_new (OSTREE_SUMMARY_GVARIANT_FORMAT);
+
+  g_variant_builder_add_value (summary_builder, g_variant_builder_end (refs_builder));
+  g_variant_builder_add_value (summary_builder, g_variant_dict_end (&additional_metadata_builder));
+
+  return g_variant_ref_sink (g_variant_builder_end (summary_builder));
+}
+
+
 /**
  * ostree_repo_regenerate_summary_with_options:
  * @self: Repo
@@ -5800,167 +5971,14 @@ ostree_repo_regenerate_summary_with_options (OstreeRepo               *self,
   if (!lock)
     return FALSE;
 
-  g_auto(GVariantDict) additional_metadata_builder = OT_VARIANT_BUILDER_INITIALIZER;
-  g_variant_dict_init (&additional_metadata_builder, additional_metadata);
-  g_autoptr(GVariantBuilder) refs_builder = g_variant_builder_new (G_VARIANT_TYPE ("a(s(taya{sv}))"));
 
-  const gchar *main_collection_id = ostree_repo_get_collection_id (self);
-
-  {
-    if (main_collection_id == NULL)
-      {
-        g_autoptr(GHashTable) refs = NULL;
-        if (!ostree_repo_list_refs (self, NULL, &refs, cancellable, error))
-          return FALSE;
-
-        g_autoptr(GList) ordered_keys = g_hash_table_get_keys (refs);
-        ordered_keys = g_list_sort (ordered_keys, (GCompareFunc)strcmp);
-
-        for (GList *iter = ordered_keys; iter; iter = iter->next)
-          {
-            const char *ref = iter->data;
-            const char *commit = g_hash_table_lookup (refs, ref);
-
-            if (!summary_add_ref_entry (self, NULL, ref, commit, refs_builder, new_commit_timestamp_key, metadata_callback, user_data, error))
-              return FALSE;
-          }
-      }
-  }
-
-
-  if (!no_deltas_in_summary)
-    {
-      g_autoptr(GPtrArray) delta_names = NULL;
-      g_auto(GVariantDict) deltas_builder = OT_VARIANT_BUILDER_INITIALIZER;
-
-      if (!ostree_repo_list_static_delta_names (self, &delta_names, cancellable, error))
-        return FALSE;
-
-      g_variant_dict_init (&deltas_builder, NULL);
-      for (guint i = 0; i < delta_names->len; i++)
-        {
-          g_autofree char *from = NULL;
-          g_autofree char *to = NULL;
-          GVariant *digest;
-
-          if (!_ostree_parse_delta_name (delta_names->pdata[i], &from, &to, error))
-            return FALSE;
-
-          digest = _ostree_repo_static_delta_superblock_digest (self,
-                                                                (from && from[0]) ? from : NULL,
-                                                                to, cancellable, error);
-          if (digest == NULL)
-            return FALSE;
-
-          g_variant_dict_insert_value (&deltas_builder, delta_names->pdata[i], digest);
-        }
-
-      if (delta_names->len > 0)
-        g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_STATIC_DELTAS, g_variant_dict_end (&deltas_builder));
-    }
-
-  {
-    g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_LAST_MODIFIED,
-                                 g_variant_new_uint64 (GUINT64_TO_BE (g_get_real_time () / G_USEC_PER_SEC)));
-  }
-
-  /* Add refs which have a collection specified, which could be in refs/mirrors,
-   * refs/heads, and/or refs/remotes. */
-  {
-    g_autoptr(GHashTable) collection_refs = NULL;
-    if (!ostree_repo_list_collection_refs (self, NULL, &collection_refs,
-                                           OSTREE_REPO_LIST_REFS_EXT_NONE, cancellable, error))
-      return FALSE;
-
-    gsize collection_map_size = 0;
-    GHashTableIter iter;
-    g_autoptr(GHashTable) collection_map = NULL;  /* (element-type utf8 GHashTable) */
-    g_hash_table_iter_init (&iter, collection_refs);
-    collection_map = g_hash_table_new_full (g_str_hash, g_str_equal, NULL,
-                                            (GDestroyNotify) g_hash_table_unref);
-
-    const OstreeCollectionRef *ref;
-    const char *checksum;
-    while (g_hash_table_iter_next (&iter, (gpointer *) &ref, (gpointer *) &checksum))
-      {
-        GHashTable *ref_map = g_hash_table_lookup (collection_map, ref->collection_id);
-
-        if (ref_map == NULL)
-          {
-            ref_map = g_hash_table_new_full (g_str_hash, g_str_equal, NULL, NULL);
-            g_hash_table_insert (collection_map, ref->collection_id, ref_map);
-          }
-
-        g_hash_table_insert (ref_map, ref->ref_name, (gpointer) checksum);
-      }
-
-    g_autoptr(GVariantBuilder) collection_refs_builder = g_variant_builder_new (G_VARIANT_TYPE ("a{sa(s(taya{sv}))}"));
-
-    g_autoptr(GList) ordered_collection_ids = g_hash_table_get_keys (collection_map);
-    ordered_collection_ids = g_list_sort (ordered_collection_ids, (GCompareFunc) strcmp);
-
-    for (GList *collection_iter = ordered_collection_ids; collection_iter; collection_iter = collection_iter->next)
-      {
-        const char *collection_id = collection_iter->data;
-        GHashTable *ref_map = g_hash_table_lookup (collection_map, collection_id);
-
-        /* We put the local repo's collection ID in the main refs map, rather
-         * than the collection map, for backwards compatibility. */
-        gboolean is_main_collection_id = (main_collection_id != NULL && g_str_equal (collection_id, main_collection_id));
-
-        if (!is_main_collection_id)
-          {
-            g_variant_builder_open (collection_refs_builder, G_VARIANT_TYPE ("{sa(s(taya{sv}))}"));
-            g_variant_builder_add (collection_refs_builder, "s", collection_id);
-            g_variant_builder_open (collection_refs_builder, G_VARIANT_TYPE ("a(s(taya{sv}))"));
-          }
-
-        g_autoptr(GList) ordered_refs = g_hash_table_get_keys (ref_map);
-        ordered_refs = g_list_sort (ordered_refs, (GCompareFunc) strcmp);
-
-        for (GList *ref_iter = ordered_refs; ref_iter != NULL; ref_iter = ref_iter->next)
-          {
-            const char *ref = ref_iter->data;
-            const char *commit = g_hash_table_lookup (ref_map, ref);
-            GVariantBuilder *builder = is_main_collection_id ? refs_builder : collection_refs_builder;
-
-            if (!summary_add_ref_entry (self, collection_id, ref, commit, builder, new_commit_timestamp_key, metadata_callback, user_data, error))
-              return FALSE;
-
-            if (!is_main_collection_id)
-              collection_map_size++;
-          }
-
-        if (!is_main_collection_id)
-          {
-            g_variant_builder_close (collection_refs_builder);  /* array */
-            g_variant_builder_close (collection_refs_builder);  /* dict entry */
-          }
-      }
-
-    if (main_collection_id != NULL)
-      g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_COLLECTION_ID,
-                                   g_variant_new_string (main_collection_id));
-    if (collection_map_size > 0)
-      g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_COLLECTION_MAP,
-                                   g_variant_builder_end (collection_refs_builder));
-  }
-
-  if (metadata_callback != NULL &&
-      !metadata_callback (self, 0, NULL, NULL, NULL,
-                          &additional_metadata_builder, user_data, error))
+  g_autoptr(GVariant) summary = generate_summary (self, additional_metadata,
+                                                  !no_deltas_in_summary,
+                                                  new_commit_timestamp_key,
+                                                  metadata_callback, user_data,
+                                                  cancellable, error);
+  if (summary == NULL)
     return FALSE;
-
-  g_autoptr(GVariant) summary = NULL;
-  {
-    g_autoptr(GVariantBuilder) summary_builder =
-      g_variant_builder_new (OSTREE_SUMMARY_GVARIANT_FORMAT);
-
-    g_variant_builder_add_value (summary_builder, g_variant_builder_end (refs_builder));
-    g_variant_builder_add_value (summary_builder, g_variant_dict_end (&additional_metadata_builder));
-    summary = g_variant_builder_end (summary_builder);
-    g_variant_ref_sink (summary);
-  }
 
   if (!_ostree_repo_static_delta_reindex (self, NULL, cancellable, error))
     return FALSE;
