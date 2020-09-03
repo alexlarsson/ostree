@@ -23,6 +23,7 @@ global:
    * Makefile-libostree.am to enable this too.
    */
   ostree_repo_list_static_delta_indexes;
+  ostree_repo_regenerate_summary_with_options;
 } LIBOSTREE_2020.4;
 
 /* Stub section for the stable release *after* this development one; don't

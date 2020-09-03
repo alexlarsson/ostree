@@ -1424,6 +1424,46 @@ gboolean ostree_repo_regenerate_summary (OstreeRepo     *self,
                                          GError        **error);
 
 /**
+ * OstreeAddMetadataCallback:
+ * @repo: Repo
+ * @version_format: The summary version format (currently 0)
+ * @collection_id: The collection id of the ref or %NULL
+ * @ref: The ref to add metadata for, or %NULL
+ * @checksum: The current commit for @ref, or %NULL
+ * @metadata_builder: A GVariantDict where you can add metadata
+ * @user_data: User data
+ * @error: return location for a #GError, or %NULL
+ *
+ * This callback is called for each ref in the main ref list and
+ * once for each ref in each collection-id ref list in each summary
+ * file. It is also called once with @ref being %NULL for each
+ * summary file to add global metadata.
+ *
+ * If multiple summaries are updated (for example for backwards
+ * compatibility) the callback can act differently depending on
+ * the @version_format value (currently always 0).
+ *
+ * Returns: %TRUE on success, %FALSE on error
+ */
+typedef gboolean (*OstreeAddMetadataCallback) (OstreeRepo     *repo,
+                                               guint32         version_format,
+                                               const char     *collection_id,
+                                               const char     *ref,
+                                               const char     *checksum,
+                                               GVariantDict   *metadata_builder,
+                                               gpointer        user_data,
+                                               GError        **error);
+
+_OSTREE_PUBLIC
+gboolean ostree_repo_regenerate_summary_with_options (OstreeRepo               *self,
+                                                      GVariant                 *additional_metadata,
+                                                      GVariant                 *options,
+                                                      OstreeAddMetadataCallback callback,
+                                                      gpointer                  user_data,
+                                                      GCancellable             *cancellable,
+                                                      GError                  **error);
+
+/**
  * OSTREE_REPO_METADATA_REF:
  *
  * The name of a ref which is used to store metadata for the entire repository,
