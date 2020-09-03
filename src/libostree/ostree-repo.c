@@ -5669,11 +5669,14 @@ ostree_repo_verify_summary (OstreeRepo    *self,
  * @refs_builder to go into a `summary` file. This includes building the
  * standard additional metadata keys for the ref. */
 static gboolean
-summary_add_ref_entry (OstreeRepo       *self,
-                       const char       *ref,
-                       const char       *checksum,
-                       GVariantBuilder  *refs_builder,
-                       GError          **error)
+summary_add_ref_entry (OstreeRepo               *self,
+                       const char               *collection_id,
+                       const char               *ref,
+                       const char               *checksum,
+                       GVariantBuilder          *refs_builder,
+                       OstreeAddMetadataCallback metadata_callback,
+                       gpointer                  user_data,
+                       GError                  **error)
 {
   g_auto(GVariantDict) commit_metadata_builder = OT_VARIANT_BUILDER_INITIALIZER;
 
@@ -5701,6 +5704,11 @@ summary_add_ref_entry (OstreeRepo       *self,
     g_variant_dict_insert_value (&commit_metadata_builder, OSTREE_COMMIT_TIMESTAMP,
                                  g_variant_new_uint64 (GUINT64_TO_BE (commit_timestamp)));
 
+  if (metadata_callback != NULL &&
+      !metadata_callback (self, OSTREE_SUMMARY_VERSION_ORIGINAL, collection_id, ref, checksum,
+                          &commit_metadata_builder, user_data, error))
+    return FALSE;
+
   g_variant_builder_add_value (refs_builder,
                                g_variant_new ("(s(t@ay@a{sv}))", ref,
                                               (guint64) g_variant_get_size (commit_obj),
@@ -5710,52 +5718,16 @@ summary_add_ref_entry (OstreeRepo       *self,
   return TRUE;
 }
 
-/**
- * ostree_repo_regenerate_summary:
- * @self: Repo
- * @additional_metadata: (allow-none): A GVariant of type a{sv}, or %NULL
- * @cancellable: Cancellable
- * @error: Error
- *
- * An OSTree repository can contain a high level "summary" file that
- * describes the available branches and other metadata.
- *
- * If the timetable for making commits and updating the summary file is fairly
- * regular, setting the `ostree.summary.expires` key in @additional_metadata
- * will aid clients in working out when to check for updates.
- *
- * It is regenerated automatically after any ref is
- * added, removed, or updated if `core/auto-update-summary` is set.
- *
- * If the `core/collection-id` key is set in the configuration, it will be
- * included as %OSTREE_SUMMARY_COLLECTION_ID in the summary file. Refs that
- * have associated collection IDs will be included in the generated summary
- * file, listed under the %OSTREE_SUMMARY_COLLECTION_MAP key. Collection IDs
- * and refs in %OSTREE_SUMMARY_COLLECTION_MAP are guaranteed to be in
- * lexicographic order.
- *
- * Locking: exclusive
- */
-gboolean
-ostree_repo_regenerate_summary (OstreeRepo     *self,
-                                GVariant       *additional_metadata,
-                                GCancellable   *cancellable,
-                                GError        **error)
+
+static GVariant *
+generate_summary (OstreeRepo               *self,
+                  GVariant                 *additional_metadata,
+                  gboolean                  include_deltas,
+                  OstreeAddMetadataCallback metadata_callback,
+                  gpointer                  user_data,
+                  GCancellable             *cancellable,
+                  GError                  **error)
 {
-  /* Take an exclusive lock. This makes sure the commits and deltas don't get
-   * deleted while generating the summary. It also means we can be sure refs
-   * won't be created/updated/deleted during the operation, without having to
-   * add exclusive locks to those operations which would prevent concurrent
-   * commits from working.
-   */
-  g_autoptr(OstreeRepoAutoLock) lock = NULL;
-  gboolean no_deltas_in_summary = FALSE;
-
-  lock = _ostree_repo_auto_lock_push (self, OSTREE_REPO_LOCK_EXCLUSIVE,
-                                      cancellable, error);
-  if (!lock)
-    return FALSE;
-
   g_auto(GVariantDict) additional_metadata_builder = OT_VARIANT_BUILDER_INITIALIZER;
   g_variant_dict_init (&additional_metadata_builder, additional_metadata);
   g_autoptr(GVariantBuilder) refs_builder = g_variant_builder_new (G_VARIANT_TYPE ("a(s(taya{sv}))"));
@@ -5767,7 +5739,7 @@ ostree_repo_regenerate_summary (OstreeRepo     *self,
       {
         g_autoptr(GHashTable) refs = NULL;
         if (!ostree_repo_list_refs (self, NULL, &refs, cancellable, error))
-          return FALSE;
+          return NULL;
 
         g_autoptr(GList) ordered_keys = g_hash_table_get_keys (refs);
         ordered_keys = g_list_sort (ordered_keys, (GCompareFunc)strcmp);
@@ -5777,24 +5749,20 @@ ostree_repo_regenerate_summary (OstreeRepo     *self,
             const char *ref = iter->data;
             const char *commit = g_hash_table_lookup (refs, ref);
 
-            if (!summary_add_ref_entry (self, ref, commit, refs_builder, error))
-              return FALSE;
+            if (!summary_add_ref_entry (self, NULL, ref, commit, refs_builder, metadata_callback, user_data, error))
+              return NULL;
           }
       }
   }
 
-  if (!ot_keyfile_get_boolean_with_default (self->config, "core",
-                                            "no-deltas-in-summary", FALSE,
-                                            &no_deltas_in_summary, error))
-    return FALSE;
 
-  if (!no_deltas_in_summary)
+  if (include_deltas)
     {
       g_autoptr(GPtrArray) delta_names = NULL;
       g_auto(GVariantDict) deltas_builder = OT_VARIANT_BUILDER_INITIALIZER;
 
       if (!ostree_repo_list_static_delta_names (self, &delta_names, cancellable, error))
-        return FALSE;
+        return NULL;
 
       g_variant_dict_init (&deltas_builder, NULL);
       for (guint i = 0; i < delta_names->len; i++)
@@ -5804,13 +5772,13 @@ ostree_repo_regenerate_summary (OstreeRepo     *self,
           GVariant *digest;
 
           if (!_ostree_parse_delta_name (delta_names->pdata[i], &from, &to, error))
-            return FALSE;
+            return NULL;
 
           digest = _ostree_repo_static_delta_superblock_digest (self,
                                                                 (from && from[0]) ? from : NULL,
                                                                 to, cancellable, error);
           if (digest == NULL)
-            return FALSE;
+            return NULL;
 
           g_variant_dict_insert_value (&deltas_builder, delta_names->pdata[i], digest);
         }
@@ -5830,7 +5798,7 @@ ostree_repo_regenerate_summary (OstreeRepo     *self,
     g_autoptr(GHashTable) collection_refs = NULL;
     if (!ostree_repo_list_collection_refs (self, NULL, &collection_refs,
                                            OSTREE_REPO_LIST_REFS_EXT_NONE, cancellable, error))
-      return FALSE;
+      return NULL;
 
     gsize collection_map_size = 0;
     GHashTableIter iter;
@@ -5884,8 +5852,8 @@ ostree_repo_regenerate_summary (OstreeRepo     *self,
             const char *commit = g_hash_table_lookup (ref_map, ref);
             GVariantBuilder *builder = is_main_collection_id ? refs_builder : collection_refs_builder;
 
-            if (!summary_add_ref_entry (self, ref, commit, builder, error))
-              return FALSE;
+            if (!summary_add_ref_entry (self, collection_id, ref, commit, builder, metadata_callback, user_data, error))
+              return NULL;
 
             if (!is_main_collection_id)
               collection_map_size++;
@@ -5906,16 +5874,102 @@ ostree_repo_regenerate_summary (OstreeRepo     *self,
                                    g_variant_builder_end (collection_refs_builder));
   }
 
-  g_autoptr(GVariant) summary = NULL;
-  {
-    g_autoptr(GVariantBuilder) summary_builder =
-      g_variant_builder_new (OSTREE_SUMMARY_GVARIANT_FORMAT);
+  if (metadata_callback != NULL &&
+      !metadata_callback (self, OSTREE_SUMMARY_VERSION_ORIGINAL, NULL, NULL, NULL,
+                          &additional_metadata_builder, user_data, error))
+    return NULL;
 
-    g_variant_builder_add_value (summary_builder, g_variant_builder_end (refs_builder));
-    g_variant_builder_add_value (summary_builder, g_variant_dict_end (&additional_metadata_builder));
-    summary = g_variant_builder_end (summary_builder);
-    g_variant_ref_sink (summary);
-  }
+  g_autoptr(GVariantBuilder) summary_builder =
+    g_variant_builder_new (OSTREE_SUMMARY_GVARIANT_FORMAT);
+
+  g_variant_builder_add_value (summary_builder, g_variant_builder_end (refs_builder));
+  g_variant_builder_add_value (summary_builder, g_variant_dict_end (&additional_metadata_builder));
+
+  return g_variant_ref_sink (g_variant_builder_end (summary_builder));
+}
+
+
+/**
+ * ostree_repo_regenerate_summary_with_options:
+ * @self: Repo
+ * @additional_metadata: (allow-none): A GVariant of type a{sv}, or %NULL
+ * @options: (nullable): A GVariant a{sv} with an extensible set of flags.
+ * @metadata_callback: (nullable): A callback that can add per-ref and/or global metadata
+ * @user_data: data to pass to @metadata_callback
+ * @cancellable: (nullable): a #GCancellable, or %NULL
+ * @error: return location for a #GError, or %NULL
+ *
+ * An OSTree repository can contain a high level "summary" file that
+ * describes the available branches and other metadata.
+ *
+ * If the timetable for making commits and updating the summary file is fairly
+ * regular, setting the `ostree.summary.expires` key in @additional_metadata
+ * will aid clients in working out when to check for updates.
+ *
+ * It is regenerated automatically after any ref is
+ * added, removed, or updated if `core/auto-update-summary` is set.
+ *
+ * If the `core/collection-id` key is set in the configuration, it will be
+ * included as %OSTREE_SUMMARY_COLLECTION_ID in the summary file. Refs that
+ * have associated collection IDs will be included in the generated summary
+ * file, listed under the %OSTREE_SUMMARY_COLLECTION_MAP key. Collection IDs
+ * and refs in %OSTREE_SUMMARY_COLLECTION_MAP are guaranteed to be in
+ * lexicographic order.
+ *
+ * @metadata_callback will be called once for each ref in the summary allowing
+ * the addition of per-ref metadata. It will also be called once with a %NULL
+ * ref for adding global metadata (in addition to the data in @additional_metadata).
+ *
+ * The following keys in @options are currently defined:
+ *
+ *   * `no-deltas-in-summary` (`b`): Don't add delta index to summary, saving space.
+ *     Client version 2020.7 or later will use the delta index instead, older versions
+ *     will not use deltas.
+ *
+ * Locking: exclusive
+ *
+ * Since: 2020.7
+ */
+gboolean
+ostree_repo_regenerate_summary_with_options (OstreeRepo               *self,
+                                             GVariant                 *additional_metadata,
+                                             GVariant                 *options,
+                                             OstreeAddMetadataCallback metadata_callback,
+                                             gpointer                  user_data,
+                                             GCancellable             *cancellable,
+                                             GError                  **error)
+{
+  /* Take an exclusive lock. This makes sure the commits and deltas don't get
+   * deleted while generating the summary. It also means we can be sure refs
+   * won't be created/updated/deleted during the operation, without having to
+   * add exclusive locks to those operations which would prevent concurrent
+   * commits from working.
+   */
+  g_autoptr(OstreeRepoAutoLock) lock = NULL;
+  gboolean no_deltas_in_summary = FALSE;
+
+  if (!ot_keyfile_get_boolean_with_default (self->config, "core",
+                                            "no-deltas-in-summary", FALSE,
+                                            &no_deltas_in_summary, error))
+    return FALSE;
+
+  if (options)
+    {
+      (void)g_variant_lookup (options, "no-deltas-in-summary", "b", &no_deltas_in_summary);
+    }
+
+  lock = _ostree_repo_auto_lock_push (self, OSTREE_REPO_LOCK_EXCLUSIVE,
+                                      cancellable, error);
+  if (!lock)
+    return FALSE;
+
+
+  g_autoptr(GVariant) summary = generate_summary (self, additional_metadata,
+                                                  !no_deltas_in_summary,
+                                                  metadata_callback, user_data,
+                                                  cancellable, error);
+  if (summary == NULL)
+    return FALSE;
 
   if (!_ostree_repo_static_delta_reindex (self, NULL, cancellable, error))
     return FALSE;
@@ -5933,6 +5987,43 @@ ostree_repo_regenerate_summary (OstreeRepo     *self,
     return FALSE;
 
   return TRUE;
+}
+
+/**
+ * ostree_repo_regenerate_summary:
+ * @self: Repo
+ * @additional_metadata: (allow-none): A GVariant of type a{sv}, or %NULL
+ * @cancellable: Cancellable
+ * @error: Error
+ *
+ * An OSTree repository can contain a high level "summary" file that
+ * describes the available branches and other metadata.
+ *
+ * If the timetable for making commits and updating the summary file is fairly
+ * regular, setting the `ostree.summary.expires` key in @additional_metadata
+ * will aid clients in working out when to check for updates.
+ *
+ * It is regenerated automatically after any ref is
+ * added, removed, or updated if `core/auto-update-summary` is set.
+ *
+ * If the `core/collection-id` key is set in the configuration, it will be
+ * included as %OSTREE_SUMMARY_COLLECTION_ID in the summary file. Refs that
+ * have associated collection IDs will be included in the generated summary
+ * file, listed under the %OSTREE_SUMMARY_COLLECTION_MAP key. Collection IDs
+ * and refs in %OSTREE_SUMMARY_COLLECTION_MAP are guaranteed to be in
+ * lexicographic order.
+ *
+ * Locking: exclusive
+ */
+gboolean
+ostree_repo_regenerate_summary (OstreeRepo     *self,
+                                GVariant       *additional_metadata,
+                                GCancellable   *cancellable,
+                                GError        **error)
+{
+  return ostree_repo_regenerate_summary_with_options (self, additional_metadata,
+                                                      NULL, NULL, NULL,
+                                                      cancellable, error);
 }
 
 /* Regenerate the summary if `core/auto-update-summary` is set. We default to FALSE for
