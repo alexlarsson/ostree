@@ -174,6 +174,15 @@ typedef enum {
 #define OSTREE_SUMMARY_SIG_GVARIANT_FORMAT G_VARIANT_TYPE (OSTREE_SUMMARY_SIG_GVARIANT_STRING)
 
 /**
+ * OSTREE_SUMMARY_INDEX_GVARIANT_FORMAT:
+ *
+ * - a{s(ay)} - Map of subset name -> (latest checksum, array of previous checksums), (Name "" for everything subset)
+ * - a{sv} - Additional metadata, currently unused
+ */
+#define OSTREE_SUMMARY_INDEX_GVARIANT_STRING "(a{s(ayaay)}a{sv})"
+#define OSTREE_SUMMARY_INDEX_GVARIANT_FORMAT G_VARIANT_TYPE (OSTREE_SUMMARY_INDEX_GVARIANT_STRING)
+
+/**
  * OSTREE_TIMESTAMP:
  *
  * The mtime used for stored files.  This was originally 0, changed to 1 for

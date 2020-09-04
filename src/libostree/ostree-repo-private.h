@@ -55,6 +55,7 @@ G_BEGIN_DECLS
 #define OSTREE_SUMMARY_EXPIRES "ostree.summary.expires"
 #define OSTREE_SUMMARY_COLLECTION_ID "ostree.summary.collection-id"
 #define OSTREE_SUMMARY_COLLECTION_MAP "ostree.summary.collection-map"
+#define OSTREE_SUMMARY_FORMAT_VERSION "ostree.summary.format-version"
 
 #define _OSTREE_PAYLOAD_LINK_PREFIX "../"
 #define _OSTREE_PAYLOAD_LINK_PREFIX_LEN (sizeof (_OSTREE_PAYLOAD_LINK_PREFIX) - 1)
