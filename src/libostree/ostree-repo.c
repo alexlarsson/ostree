@@ -5889,6 +5889,16 @@ generate_summary (OstreeRepo               *self,
 
   const gchar *main_collection_id = ostree_repo_get_collection_id (self);
 
+  g_autoptr(GRegex) refs_regex = NULL;
+  if (subset != NULL && *subset != 0)
+    {
+      g_autofree char *group = g_strdup_printf ("subset \"%s\"", subset);
+      g_autofree char *refs_regex_s = g_key_file_get_string (self->config, group, "refs", NULL);
+
+      if (refs_regex_s != NULL)
+        refs_regex = g_regex_new (refs_regex_s, 0, 0, NULL);
+    }
+
   {
     if (main_collection_id == NULL)
       {
@@ -5902,6 +5912,10 @@ generate_summary (OstreeRepo               *self,
         for (GList *iter = ordered_keys; iter; iter = iter->next)
           {
             const char *ref = iter->data;
+
+            if (refs_regex != NULL && g_regex_match (refs_regex, ref, 0, NULL))
+              continue;
+
             const char *commit = g_hash_table_lookup (refs, ref);
 
             if (!summary_add_ref_entry (self, subset, NULL, ref, commit, refs_builder, new_commit_timestamp_key,
@@ -6016,6 +6030,9 @@ generate_summary (OstreeRepo               *self,
             const char *ref = ref_iter->data;
             const char *commit = g_hash_table_lookup (ref_map, ref);
             GVariantBuilder *builder = is_main_collection_id ? refs_builder : collection_refs_builder;
+
+            if (refs_regex != NULL && g_regex_match (refs_regex, ref, 0, NULL))
+              continue;
 
             if (!summary_add_ref_entry (self, subset, collection_id, ref, commit, builder, new_commit_timestamp_key,
                                         metadata_callback, user_data, commit_cache, error))
@@ -6179,6 +6196,42 @@ prune_summaries (OstreeRepo *self,
   return TRUE;
 }
 
+static char **
+_ostree_repo_list_subsets (OstreeRepo *self)
+{
+  gsize i, n_groups;
+  static gsize regex_initialized;
+  static GRegex *regex;
+
+  if (g_once_init_enter (&regex_initialized))
+    {
+      regex = g_regex_new ("^subset \"(.+)\"$", 0, 0, NULL);
+      g_assert (regex);
+      g_once_init_leave (&regex_initialized, 1);
+    }
+
+  g_autoptr(GPtrArray) subsets = g_ptr_array_new_with_free_func (g_free);
+
+  /* We always have an everything-subset */
+  g_ptr_array_add (subsets, g_strdup (""));
+
+  g_auto(GStrv) groups = g_key_file_get_groups (self->config, &n_groups);
+  for (i = 0; i < n_groups; i++)
+    {
+      g_autoptr(GMatchInfo) match = NULL;
+      if (g_regex_match (regex, groups[i], 0, &match))
+        {
+          g_autofree char *name = g_match_info_fetch (match, 1);
+          if (name)
+            g_ptr_array_add (subsets, g_steal_pointer (&name));
+        }
+    }
+
+  g_ptr_array_add (subsets, NULL);
+
+  return (char **)g_ptr_array_free (g_steal_pointer (&subsets), FALSE);
+}
+
 /**
  * ostree_repo_regenerate_summary_with_options:
  * @self: Repo
@@ -6297,7 +6350,7 @@ ostree_repo_regenerate_summary_with_options (OstreeRepo               *self,
                                                                    (GDestroyNotify) g_variant_unref, (GDestroyNotify) g_variant_unref);
       g_autoptr(GVariantBuilder) subset_builder = g_variant_builder_new (G_VARIANT_TYPE ("a{s(ayaay)}"));
 
-      const char *subsets[] = { "", NULL }; /* Only everything subset for now */
+      g_auto(GStrv) subsets = _ostree_repo_list_subsets (self);
       for (i = 0; subsets[i] != NULL; i++)
         {
           const char *subset = subsets[i];
