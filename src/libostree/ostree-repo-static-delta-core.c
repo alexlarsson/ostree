@@ -72,10 +72,7 @@ _ostree_repo_static_delta_superblock_digest (OstreeRepo    *repo,
   if (!superblock_content)
     return NULL;
 
-  g_auto(OtChecksum) hasher = { 0, };
-  ot_checksum_init (&hasher);
-  ot_checksum_update_bytes (&hasher, superblock_content);
-  ot_checksum_get_digest (&hasher, digest, sizeof (digest));
+  ot_checksum_bytes (superblock_content,digest);
 
   return ot_gvariant_new_bytearray (digest, sizeof (digest));
 }
