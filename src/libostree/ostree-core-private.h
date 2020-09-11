@@ -36,6 +36,13 @@ G_BEGIN_DECLS
 #define DEFAULT_DIRECTORY_MODE 0775
 #define DEFAULT_REGFILE_MODE 0660
 
+enum {
+  OSTREE_SUMMARY_VERSION_ORIGINAL = 0,
+  OSTREE_SUMMARY_VERSION_INDEXED = 1,
+};
+
+#define OSTREE_SUMMARY_VERSION_LATEST OSTREE_SUMMARY_VERSION_INDEXED
+
 /* This file contains private implementation data format definitions
  * read by multiple implementation .c files.
  */
