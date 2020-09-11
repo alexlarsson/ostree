@@ -37,6 +37,14 @@ ot_keyfile_get_boolean_with_default (GKeyFile      *keyfile,
 
 
 gboolean
+ot_keyfile_get_integer_with_default (GKeyFile      *keyfile,
+                                     const char    *section,
+                                     const char    *value,
+                                     int            default_value,
+                                     gint          *out_int,
+                                     GError       **error);
+
+gboolean
 ot_keyfile_get_value_with_default (GKeyFile      *keyfile,
                                    const char    *section,
                                    const char    *value,

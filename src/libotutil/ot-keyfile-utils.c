@@ -67,6 +67,39 @@ ot_keyfile_get_boolean_with_default (GKeyFile      *keyfile,
 }
 
 gboolean
+ot_keyfile_get_integer_with_default (GKeyFile      *keyfile,
+                                     const char    *section,
+                                     const char    *value,
+                                     int            default_value,
+                                     gint          *out_int,
+                                     GError       **error)
+{
+  g_return_val_if_fail (keyfile != NULL, FALSE);
+  g_return_val_if_fail (section != NULL, FALSE);
+  g_return_val_if_fail (value != NULL, FALSE);
+
+  GError *temp_error = NULL;
+  gint ret_int = g_key_file_get_integer (keyfile, section, value, &temp_error);
+  if (temp_error)
+    {
+      if (is_notfound (temp_error))
+        {
+          g_clear_error (&temp_error);
+          ret_int = default_value;
+        }
+      else
+        {
+          g_propagate_error (error, temp_error);
+          return FALSE;
+        }
+    }
+
+  *out_int = ret_int;
+  return TRUE;
+}
+
+
+gboolean
 ot_keyfile_get_value_with_default (GKeyFile      *keyfile,
                                    const char    *section,
                                    const char    *value,
