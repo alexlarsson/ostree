@@ -166,6 +166,15 @@ static gboolean initiate_delta_request (OtPullData                *pull_data,
                                         const char                 *delta_from_revision,
                                         GError                    **error);
 
+static gboolean _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
+                                                   const char    *name,
+                                                   GVariant      *options,
+                                                   GBytes       **out_summary,
+                                                   GBytes       **out_signatures,
+                                                   guint64       *out_last_modified,
+                                                   GCancellable  *cancellable,
+                                                   GError       **error);
+
 static gboolean
 update_progress (gpointer user_data)
 {
@@ -6554,12 +6563,14 @@ _ostree_repo_remote_fetch_indexed_summary (OstreeRepo    *self,
                                            GVariant     *index_sig,
                                            GBytes       **out_summary,
                                            GBytes       **out_signatures,
+                                           guint64       *out_last_modified,
                                            GCancellable  *cancellable,
                                            GError       **error)
 {
   g_autoptr(GVariant) subset_info = summary_index_find_subset (index, subset);
   g_autoptr(GBytes) subset_summary = NULL;
   g_autoptr(GBytes) subset_signatures = NULL;
+  g_autoptr(GVariant) index_metadata = g_variant_get_child_value (index, 1);
 
   if (subset_info == NULL)
     {
@@ -6633,48 +6644,28 @@ _ostree_repo_remote_fetch_indexed_summary (OstreeRepo    *self,
   if (out_signatures != NULL)
     *out_signatures = g_steal_pointer (&subset_signatures);
 
+  if (out_last_modified != NULL)
+    {
+      guint64 summary_last_modified;
+
+      if (!g_variant_lookup (index_metadata, OSTREE_SUMMARY_LAST_MODIFIED, "t", &summary_last_modified))
+        *out_last_modified = 0;
+      else
+        *out_last_modified = GUINT64_FROM_BE (summary_last_modified);
+    }
+
   return TRUE;
 }
 
-
-
-
-/**
- * ostree_repo_remote_fetch_summary_with_options:
- * @self: Self
- * @name: name of a remote
- * @options: (nullable): A GVariant a{sv} with an extensible set of flags
- * @out_summary: (out) (optional): return location for raw summary data, or
- *               %NULL
- * @out_signatures: (out) (optional): return location for raw summary
- *                  signature data, or %NULL
- * @cancellable: a #GCancellable
- * @error: a #GError
- *
- * Like ostree_repo_remote_fetch_summary(), but supports an extensible set of flags.
- * The following are currently defined:
- *
- * - override-url (s): Fetch summary from this URL if remote specifies no metalink in options
- * - http-headers (a(ss)): Additional headers to add to all HTTP requests
- * - append-user-agent (s): Additional string to append to the user agent
- * - n-network-retries (u): Number of times to retry each download on receiving
- *   a transient network error, such as a socket timeout; default is 5, 0
- *   means return errors without retrying
- * - max-supported-version (u): Don't return summary file with a higher format version than this.
- * - subset (s): The subset to download the summary for, "" means no subset
- *
- * Returns: %TRUE on success, %FALSE on failure
- *
- * Since: 2016.6
- */
-gboolean
-ostree_repo_remote_fetch_summary_with_options (OstreeRepo    *self,
-                                               const char    *name,
-                                               GVariant      *options,
-                                               GBytes       **out_summary,
-                                               GBytes       **out_signatures,
-                                               GCancellable  *cancellable,
-                                               GError       **error)
+static gboolean
+_ostree_repo_remote_fetch_summary (OstreeRepo    *self,
+                                   const char    *name,
+                                   GVariant      *options,
+                                   GBytes       **out_summary,
+                                   GBytes       **out_signatures,
+                                   guint64       *out_last_modified,
+                                   GCancellable  *cancellable,
+                                   GError       **error)
 {
   g_autofree char *metalink_url_string = NULL;
   g_autoptr(GBytes) summary = NULL;
@@ -6759,7 +6750,7 @@ ostree_repo_remote_fetch_summary_with_options (OstreeRepo    *self,
                                                           gpg_verify_summary, signapi_summary_verifiers,
                                                           fetcher, mirrorlist, n_network_retries,
                                                           index, index_sig,
-                                                          out_summary, out_signatures,
+                                                          out_summary, out_signatures, out_last_modified,
                                                           cancellable, error);
 
       /* No index, fall back */
@@ -6845,6 +6836,19 @@ ostree_repo_remote_fetch_summary_with_options (OstreeRepo    *self,
         }
     }
 
+  if (out_last_modified != NULL)
+    {
+      g_autoptr(GVariant) summary_v = g_variant_ref_sink (g_variant_new_from_bytes (OSTREE_SUMMARY_GVARIANT_FORMAT,
+                                                                                  summary, FALSE));
+      g_autoptr(GVariant) additional_metadata = g_variant_get_child_value (summary_v, 1);
+      guint64 summary_last_modified;
+
+      if (!g_variant_lookup (additional_metadata, OSTREE_SUMMARY_LAST_MODIFIED, "t", &summary_last_modified))
+        *out_last_modified = 0;
+      else
+        *out_last_modified = GUINT64_FROM_BE (summary_last_modified);
+    }
+
   if (out_summary != NULL)
     *out_summary = g_steal_pointer (&summary);
 
@@ -6869,14 +6873,15 @@ ostree_repo_pull_with_options (OstreeRepo             *self,
   return FALSE;
 }
 
-gboolean
-ostree_repo_remote_fetch_summary_with_options (OstreeRepo    *self,
-                                               const char    *name,
-                                               GVariant      *options,
-                                               GBytes       **out_summary,
-                                               GBytes       **out_signatures,
-                                               GCancellable  *cancellable,
-                                               GError       **error)
+static gboolean
+_ostree_repo_remote_fetch_summary (OstreeRepo    *self,
+                                   const char    *name,
+                                   GVariant      *options,
+                                   GBytes       **out_summary,
+                                   GBytes       **out_signatures,
+                                   guint64       *out_last_modified,
+                                   GCancellable  *cancellable,
+                                   GError       **error)
 {
   g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
                        "This version of ostree was built without libsoup or libcurl, and cannot fetch over HTTP");
@@ -6951,3 +6956,45 @@ ostree_repo_pull_from_remotes_finish (OstreeRepo    *self,
 }
 
 #endif /* HAVE_LIBCURL_OR_LIBSOUP */
+
+/**
+ * ostree_repo_remote_fetch_summary_with_options:
+ * @self: Self
+ * @name: name of a remote
+ * @options: (nullable): A GVariant a{sv} with an extensible set of flags
+ * @out_summary: (out) (optional): return location for raw summary data, or
+ *               %NULL
+ * @out_signatures: (out) (optional): return location for raw summary
+ *                  signature data, or %NULL
+ * @cancellable: a #GCancellable
+ * @error: a #GError
+ *
+ * Like ostree_repo_remote_fetch_summary(), but supports an extensible set of flags.
+ * The following are currently defined:
+ *
+ * - override-url (s): Fetch summary from this URL if remote specifies no metalink in options
+ * - http-headers (a(ss)): Additional headers to add to all HTTP requests
+ * - append-user-agent (s): Additional string to append to the user agent
+ * - n-network-retries (u): Number of times to retry each download on receiving
+ *   a transient network error, such as a socket timeout; default is 5, 0
+ *   means return errors without retrying
+ * - max-supported-version (u): Don't return summary file with a higher format version than this.
+ * - subset (s): The subset to download the summary for, "" means no subset
+ *
+ * Returns: %TRUE on success, %FALSE on failure
+ *
+ * Since: 2016.6
+ */
+gboolean
+ostree_repo_remote_fetch_summary_with_options (OstreeRepo    *self,
+                                               const char    *name,
+                                               GVariant      *options,
+                                               GBytes       **out_summary,
+                                               GBytes       **out_signatures,
+                                               GCancellable  *cancellable,
+                                               GError       **error)
+{
+  return _ostree_repo_remote_fetch_summary (self, name, options,
+                                            out_summary, out_signatures, NULL,
+                                            cancellable, error);
+}
