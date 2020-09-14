@@ -3156,17 +3156,17 @@ out:
 }
 
 static gboolean
-_ostree_preload_metadata_file (OstreeRepo    *self,
-                               OstreeFetcher *fetcher,
-                               GPtrArray     *mirrorlist,
-                               const char    *filename,
-                               gboolean      is_metalink,
-                               guint         n_network_retries,
-                               GBytes        **out_bytes,
-                               GCancellable  *cancellable,
-                               GError        **error)
+_ostree_preload_metadata_file (OstreeRepo       *self,
+                               OstreeFetcher    *fetcher,
+                               GPtrArray        *mirrorlist,
+                               const char       *filename,
+                               OstreeFetcherURI *metalink_url,
+                               guint             n_network_retries,
+                               GBytes          **out_bytes,
+                               GCancellable     *cancellable,
+                               GError          **error)
 {
-  if (is_metalink)
+  if (metalink_url != NULL)
     {
       GError *local_error = NULL;
 
@@ -3175,7 +3175,7 @@ _ostree_preload_metadata_file (OstreeRepo    *self,
       g_autoptr(OstreeMetalink) metalink =
         _ostree_metalink_new (fetcher, filename,
                               OSTREE_MAX_METADATA_SIZE,
-                              mirrorlist->pdata[0], n_network_retries);
+                              metalink_url, n_network_retries);
 
       _ostree_metalink_request_sync (metalink, NULL, out_bytes,
                                      cancellable, &local_error);
@@ -6372,18 +6372,18 @@ summary_index_find_subset (GVariant   *index,
 }
 
 static gboolean
-repo_remote_fetch_summary_index (OstreeRepo    *self,
-                                 const char    *name,
-                                 const char    *metalink_url_string,
-                                 gboolean      gpg_verify_summary,
-                                 GPtrArray    *signapi_summary_verifiers,
-                                 OstreeFetcher *fetcher,
-                                 GPtrArray     *mirrorlist,
-                                 guint          n_network_retries,
-                                 GVariant     **out_summary_idx,
-                                 GVariant     **out_summary_idx_sig,
-                                 GCancellable  *cancellable,
-                                 GError       **error)
+repo_remote_fetch_summary_index (OstreeRepo       *self,
+                                 const char       *name,
+                                 OstreeFetcherURI *metalink_url,
+                                 gboolean          gpg_verify_summary,
+                                 GPtrArray        *signapi_summary_verifiers,
+                                 OstreeFetcher    *fetcher,
+                                 GPtrArray        *mirrorlist,
+                                 guint             n_network_retries,
+                                 GVariant        **out_summary_idx,
+                                 GVariant        **out_summary_idx_sig,
+                                 GCancellable     *cancellable,
+                                 GError          **error)
 {
   g_autoptr(GVariant) cached_index = NULL;
   g_autoptr(GVariant) cached_index_sig = NULL;
@@ -6404,7 +6404,7 @@ repo_remote_fetch_summary_index (OstreeRepo    *self,
                                       fetcher,
                                       mirrorlist,
                                       "summary.idx",
-                                      metalink_url_string ? TRUE : FALSE,
+                                      metalink_url,
                                       n_network_retries,
                                       &index_b,
                                       cancellable,
@@ -6436,7 +6436,7 @@ repo_remote_fetch_summary_index (OstreeRepo    *self,
                                       fetcher,
                                       mirrorlist,
                                       "summary.idx.sig",
-                                      metalink_url_string ? TRUE : FALSE,
+                                      metalink_url,
                                       n_network_retries,
                                       &index_sig_b,
                                       cancellable,
@@ -6560,22 +6560,22 @@ _ostree_repo_gc_cache_summary (OstreeRepo        *self,
 }
 
 static gboolean
-_ostree_repo_remote_fetch_indexed_summary (OstreeRepo    *self,
-                                           const char    *name,
-                                           const char    *subset,
-                                           const char    *metalink_url_string,
-                                           gboolean      gpg_verify_summary,
-                                           GPtrArray    *signapi_summary_verifiers,
-                                           OstreeFetcher *fetcher,
-                                           GPtrArray     *mirrorlist,
-                                           guint          n_network_retries,
-                                           GVariant     *index,
-                                           GVariant     *index_sig,
-                                           GBytes       **out_summary,
-                                           GBytes       **out_signatures,
-                                           guint64       *out_last_modified,
-                                           GCancellable  *cancellable,
-                                           GError       **error)
+_ostree_repo_remote_fetch_indexed_summary (OstreeRepo       *self,
+                                           const char       *name,
+                                           const char       *subset,
+                                           OstreeFetcherURI *metalink_url,
+                                           gboolean          gpg_verify_summary,
+                                           GPtrArray        *signapi_summary_verifiers,
+                                           OstreeFetcher    *fetcher,
+                                           GPtrArray        *mirrorlist,
+                                           guint             n_network_retries,
+                                           GVariant         *index,
+                                           GVariant         *index_sig,
+                                           GBytes          **out_summary,
+                                           GBytes          **out_signatures,
+                                           guint64          *out_last_modified,
+                                           GCancellable     *cancellable,
+                                           GError          **error)
 {
   g_autoptr(GVariant) subset_info = summary_index_find_subset (index, subset);
   g_autoptr(GBytes) subset_summary = NULL;
@@ -6613,7 +6613,7 @@ _ostree_repo_remote_fetch_indexed_summary (OstreeRepo    *self,
 
       /* Not in cache, download */
       if (!_ostree_preload_metadata_file (self, fetcher, mirrorlist, subset_path,
-                                          metalink_url_string ? TRUE : FALSE,
+                                          metalink_url,
                                           n_network_retries, &subset_summary,
                                           cancellable, error))
         return FALSE;
@@ -6678,6 +6678,7 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
                                    GError       **error)
 {
   g_autofree char *metalink_url_string = NULL;
+  g_autoptr(OstreeFetcherURI) metalink_url = NULL;
   g_autoptr(GBytes) summary = NULL;
   g_autoptr(GBytes) signatures = NULL;
   gboolean gpg_verify_summary;
@@ -6729,13 +6730,9 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
 
   if (metalink_url_string)
     {
-      g_autoptr(OstreeFetcherURI) uri = _ostree_fetcher_uri_parse (metalink_url_string, error);
-      if (!uri)
+      metalink_url = _ostree_fetcher_uri_parse (metalink_url_string, error);
+      if (metalink_url == NULL)
         return FALSE;
-
-      mirrorlist =
-        g_ptr_array_new_with_free_func ((GDestroyNotify) _ostree_fetcher_uri_free);
-      g_ptr_array_add (mirrorlist, g_steal_pointer (&uri));
     }
   else if (!compute_effective_mirrorlist (self, name, url_override,
                                           fetcher, n_network_retries,
@@ -6748,7 +6745,7 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
       g_autoptr(GVariant) index = NULL;
       g_autoptr(GVariant) index_sig = NULL;
 
-      if (!repo_remote_fetch_summary_index (self, name, metalink_url_string,
+      if (!repo_remote_fetch_summary_index (self, name, metalink_url,
                                             gpg_verify_summary, signapi_summary_verifiers,
                                             fetcher, mirrorlist, n_network_retries,
                                             &index, &index_sig,
@@ -6756,7 +6753,7 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
         return FALSE;
 
       if (index)
-        return _ostree_repo_remote_fetch_indexed_summary (self, name, subset, metalink_url_string,
+        return _ostree_repo_remote_fetch_indexed_summary (self, name, subset, metalink_url,
                                                           gpg_verify_summary, signapi_summary_verifiers,
                                                           fetcher, mirrorlist, n_network_retries,
                                                           index, index_sig,
@@ -6785,7 +6782,7 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
                                       fetcher,
                                       mirrorlist,
                                       "summary.sig",
-                                      metalink_url_string ? TRUE : FALSE,
+                                      metalink_url,
                                       n_network_retries,
                                       &signatures,
                                       cancellable,
@@ -6811,7 +6808,7 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
                                           fetcher,
                                           mirrorlist,
                                           "summary",
-                                          metalink_url_string ? TRUE : FALSE,
+                                          metalink_url,
                                           n_network_retries,
                                           &summary,
                                           cancellable,
