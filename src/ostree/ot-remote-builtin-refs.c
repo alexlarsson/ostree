@@ -27,6 +27,7 @@
 #include "ot-remote-builtins.h"
 
 static char* opt_cache_dir;
+static gboolean opt_collections;
 
 /* ATTENTION:
  * Please remember to update the bash-completion script (bash/ostree) and
@@ -35,8 +36,33 @@ static char* opt_cache_dir;
 
 static GOptionEntry option_entries[] = {
   { "cache-dir", 0, 0, G_OPTION_ARG_FILENAME, &opt_cache_dir, "Use custom cache dir", NULL },
+  { "collections", 'c', 0, G_OPTION_ARG_NONE, &opt_collections, "Enable listing collection IDs for refs", NULL },
   { NULL }
 };
+
+static int
+collection_ref_cmp (OstreeCollectionRef *a,
+                    OstreeCollectionRef *b)
+{
+  if (a->collection_id == NULL)
+    {
+      if (b->collection_id == NULL)
+        return -1;
+    }
+  else
+    {
+      int cmp;
+
+      if (b->collection_id == NULL)
+        return 1;
+
+      cmp = strcmp (a->collection_id, b->collection_id);
+      if (cmp != 0)
+        return cmp;
+    }
+
+  return strcmp (a->ref_name, b->ref_name);
+}
 
 gboolean
 ot_remote_builtin_refs (int argc, char **argv, OstreeCommandInvocation *invocation, GCancellable *cancellable, GError **error)
@@ -67,19 +93,42 @@ ot_remote_builtin_refs (int argc, char **argv, OstreeCommandInvocation *invocati
 
   remote_name = argv[1];
 
-  if (!ostree_repo_remote_list_refs (repo, remote_name, &refs, cancellable, error))
-    goto out;
+  if (opt_collections)
+    {
+      if (!ostree_repo_remote_list_collection_refs (repo, remote_name, &refs, cancellable, error))
+        goto out;
+      else
+        {
+          g_autoptr(GList) ordered_keys = NULL;
+          GList *iter = NULL;
+
+          ordered_keys = g_hash_table_get_keys (refs);
+          ordered_keys = g_list_sort (ordered_keys, (GCompareFunc) collection_ref_cmp);
+
+          for (iter = ordered_keys; iter; iter = iter->next)
+            {
+              OstreeCollectionRef *ref = iter->data;
+              if (ref->collection_id)
+                g_print ("(%s, %s)\n", ref->collection_id, ref->ref_name);
+            }
+        }
+    }
   else
     {
-      g_autoptr(GList) ordered_keys = NULL;
-      GList *iter = NULL;
-
-      ordered_keys = g_hash_table_get_keys (refs);
-      ordered_keys = g_list_sort (ordered_keys, (GCompareFunc) strcmp);
-
-      for (iter = ordered_keys; iter; iter = iter->next)
+      if (!ostree_repo_remote_list_refs (repo, remote_name, &refs, cancellable, error))
+        goto out;
+      else
         {
-          g_print ("%s:%s\n", remote_name, (const char *) iter->data);
+          g_autoptr(GList) ordered_keys = NULL;
+          GList *iter = NULL;
+
+          ordered_keys = g_hash_table_get_keys (refs);
+          ordered_keys = g_list_sort (ordered_keys, (GCompareFunc) strcmp);
+
+          for (iter = ordered_keys; iter; iter = iter->next)
+            {
+              g_print ("%s:%s\n", remote_name, (const char *) iter->data);
+            }
         }
     }
 
