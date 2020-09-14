@@ -6667,105 +6667,28 @@ _ostree_repo_remote_fetch_indexed_summary (OstreeRepo       *self,
   return TRUE;
 }
 
+
 static gboolean
-_ostree_repo_remote_fetch_summary (OstreeRepo    *self,
-                                   const char    *name,
-                                   GVariant      *options,
-                                   GBytes       **out_summary,
-                                   GBytes       **out_signatures,
-                                   guint64       *out_last_modified,
-                                   GCancellable  *cancellable,
-                                   GError       **error)
+_ostree_repo_remote_fetch_non_indexed_summary (OstreeRepo       *self,
+                                               const char       *name,
+                                               const char       *subset,
+                                               OstreeFetcherURI *metalink_url,
+                                               gboolean          gpg_verify_summary,
+                                               GPtrArray        *signapi_summary_verifiers,
+                                               OstreeFetcher    *fetcher,
+                                               GPtrArray        *mirrorlist,
+                                               guint             n_network_retries,
+                                               GBytes          **out_summary,
+                                               GBytes          **out_signatures,
+                                               guint64          *out_last_modified,
+                                               GCancellable     *cancellable,
+                                               GError          **error)
 {
-  g_autofree char *metalink_url_string = NULL;
-  g_autoptr(OstreeFetcherURI) metalink_url = NULL;
+  gboolean summary_is_from_cache = FALSE;
   g_autoptr(GBytes) summary = NULL;
   g_autoptr(GBytes) signatures = NULL;
-  gboolean gpg_verify_summary;
-  g_autoptr(GPtrArray) signapi_summary_verifiers = NULL;
-  gboolean summary_is_from_cache = FALSE;
-  g_autoptr(OstreeFetcher) fetcher = NULL;
-  g_autoptr(GMainContextPopDefault) mainctx = NULL;
-  const char *url_override = NULL;
-  g_autoptr(GVariant) extra_headers = NULL;
-  g_autoptr(GPtrArray) mirrorlist = NULL;
-  const char *append_user_agent = NULL;
-  guint n_network_retries = DEFAULT_N_NETWORK_RETRIES;
-  const char *subset = NULL;
-  guint max_supported_version = 0;
 
-  g_return_val_if_fail (OSTREE_REPO (self), FALSE);
-  g_return_val_if_fail (name != NULL, FALSE);
-
-  if (!ostree_repo_get_remote_option (self, name, "metalink", NULL,
-                                      &metalink_url_string, error))
-    return FALSE;
-
-  if (options)
-    {
-      (void) g_variant_lookup (options, "override-url", "&s", &url_override);
-      (void) g_variant_lookup (options, "http-headers", "@a(ss)", &extra_headers);
-      (void) g_variant_lookup (options, "append-user-agent", "&s", &append_user_agent);
-      (void) g_variant_lookup (options, "n-network-retries", "u", &n_network_retries);
-      (void) g_variant_lookup (options, "max-supported-version", "u", &max_supported_version);
-      (void) g_variant_lookup (options, "subset", "&s", &subset);
-    }
-
-  if (subset == NULL)
-    subset = "";
-
-  if (!ostree_repo_remote_get_gpg_verify_summary (self, name, &gpg_verify_summary, error))
-    return FALSE;
-
-  if (!_signapi_init_for_remote (self, name, NULL,
-                                 &signapi_summary_verifiers,
-                                 error))
-    return FALSE;
-
-  mainctx = _ostree_main_context_new_default ();
-
-  fetcher = _ostree_repo_remote_new_fetcher (self, name, TRUE, extra_headers, append_user_agent, NULL, error);
-  if (fetcher == NULL)
-    return FALSE;
-
-  if (metalink_url_string)
-    {
-      metalink_url = _ostree_fetcher_uri_parse (metalink_url_string, error);
-      if (metalink_url == NULL)
-        return FALSE;
-    }
-  else if (!compute_effective_mirrorlist (self, name, url_override,
-                                          fetcher, n_network_retries,
-                                          &mirrorlist, cancellable, error))
-    return FALSE;
-
-  if (max_supported_version >= OSTREE_SUMMARY_VERSION_INDEXED)
-    {
-      /* Use the index */
-      g_autoptr(GVariant) index = NULL;
-      g_autoptr(GVariant) index_sig = NULL;
-
-      if (!repo_remote_fetch_summary_index (self, name, metalink_url,
-                                            gpg_verify_summary, signapi_summary_verifiers,
-                                            fetcher, mirrorlist, n_network_retries,
-                                            &index, &index_sig,
-                                            cancellable, error))
-        return FALSE;
-
-      if (index)
-        return _ostree_repo_remote_fetch_indexed_summary (self, name, subset, metalink_url,
-                                                          gpg_verify_summary, signapi_summary_verifiers,
-                                                          fetcher, mirrorlist, n_network_retries,
-                                                          index, index_sig,
-                                                          out_summary, out_signatures, out_last_modified,
-                                                          cancellable, error);
-
-      /* No index, fall back */
-    }
-
-  /* Handle OSTREE_SUMMARY_VERSION_ORIGINAL versions */
-
-  if (*subset != 0)
+  if (subset != NULL && *subset != 0)
     {
       /* There are no subsets in the old format */
       g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
@@ -6863,6 +6786,108 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
     *out_signatures = g_steal_pointer (&signatures);
 
   return TRUE;
+}
+
+static gboolean
+_ostree_repo_remote_fetch_summary (OstreeRepo    *self,
+                                   const char    *name,
+                                   GVariant      *options,
+                                   GBytes       **out_summary,
+                                   GBytes       **out_signatures,
+                                   guint64       *out_last_modified,
+                                   GCancellable  *cancellable,
+                                   GError       **error)
+{
+  g_autofree char *metalink_url_string = NULL;
+  g_autoptr(OstreeFetcherURI) metalink_url = NULL;
+  gboolean gpg_verify_summary;
+  g_autoptr(GPtrArray) signapi_summary_verifiers = NULL;
+  g_autoptr(OstreeFetcher) fetcher = NULL;
+  g_autoptr(GMainContextPopDefault) mainctx = NULL;
+  const char *url_override = NULL;
+  g_autoptr(GVariant) extra_headers = NULL;
+  g_autoptr(GPtrArray) mirrorlist = NULL;
+  const char *append_user_agent = NULL;
+  guint n_network_retries = DEFAULT_N_NETWORK_RETRIES;
+  const char *subset = NULL;
+  guint max_supported_version = 0;
+
+  g_return_val_if_fail (OSTREE_REPO (self), FALSE);
+  g_return_val_if_fail (name != NULL, FALSE);
+
+  if (!ostree_repo_get_remote_option (self, name, "metalink", NULL,
+                                      &metalink_url_string, error))
+    return FALSE;
+
+  if (options)
+    {
+      (void) g_variant_lookup (options, "override-url", "&s", &url_override);
+      (void) g_variant_lookup (options, "http-headers", "@a(ss)", &extra_headers);
+      (void) g_variant_lookup (options, "append-user-agent", "&s", &append_user_agent);
+      (void) g_variant_lookup (options, "n-network-retries", "u", &n_network_retries);
+      (void) g_variant_lookup (options, "max-supported-version", "u", &max_supported_version);
+      (void) g_variant_lookup (options, "subset", "&s", &subset);
+    }
+
+  if (subset == NULL)
+    subset = "";
+
+  if (!ostree_repo_remote_get_gpg_verify_summary (self, name, &gpg_verify_summary, error))
+    return FALSE;
+
+  if (!_signapi_init_for_remote (self, name, NULL,
+                                 &signapi_summary_verifiers,
+                                 error))
+    return FALSE;
+
+  mainctx = _ostree_main_context_new_default ();
+
+  fetcher = _ostree_repo_remote_new_fetcher (self, name, TRUE, extra_headers, append_user_agent, NULL, error);
+  if (fetcher == NULL)
+    return FALSE;
+
+  if (metalink_url_string)
+    {
+      metalink_url = _ostree_fetcher_uri_parse (metalink_url_string, error);
+      if (metalink_url == NULL)
+        return FALSE;
+    }
+  else if (!compute_effective_mirrorlist (self, name, url_override,
+                                          fetcher, n_network_retries,
+                                          &mirrorlist, cancellable, error))
+    return FALSE;
+
+  if (max_supported_version >= OSTREE_SUMMARY_VERSION_INDEXED)
+    {
+      /* Use the index */
+      g_autoptr(GVariant) index = NULL;
+      g_autoptr(GVariant) index_sig = NULL;
+
+      if (!repo_remote_fetch_summary_index (self, name, metalink_url,
+                                            gpg_verify_summary, signapi_summary_verifiers,
+                                            fetcher, mirrorlist, n_network_retries,
+                                            &index, &index_sig,
+                                            cancellable, error))
+        return FALSE;
+
+      if (index)
+        return _ostree_repo_remote_fetch_indexed_summary (self, name, subset, metalink_url,
+                                                          gpg_verify_summary, signapi_summary_verifiers,
+                                                          fetcher, mirrorlist, n_network_retries,
+                                                          index, index_sig,
+                                                          out_summary, out_signatures, out_last_modified,
+                                                          cancellable, error);
+
+      /* No index, fall back */
+    }
+
+  /* Handle OSTREE_SUMMARY_VERSION_ORIGINAL versions */
+
+  return _ostree_repo_remote_fetch_non_indexed_summary (self, name, subset, metalink_url,
+                                                        gpg_verify_summary, signapi_summary_verifiers,
+                                                        fetcher, mirrorlist, n_network_retries,
+                                                        out_summary, out_signatures, out_last_modified,
+                                                        cancellable, error);
 }
 
 #else /* HAVE_LIBCURL_OR_LIBSOUP */
