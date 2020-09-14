@@ -2815,9 +2815,14 @@ _ostree_repo_verify_summary (OstreeRepo   *self,
                              GPtrArray    *signapi_summary_verifiers,
                              GBytes       *summary,
                              GBytes       *signatures,
+                             gboolean     *out_signature_failed,
                              GCancellable *cancellable,
                              GError      **error)
 {
+  if (out_signature_failed)
+    *out_signature_failed = FALSE;
+
+#ifndef OSTREE_DISABLE_GPGME
   if (gpg_verify_summary)
     {
       if (summary == NULL)
@@ -2846,9 +2851,14 @@ _ostree_repo_verify_summary (OstreeRepo   *self,
                                                cancellable,
                                                error);
           if (!ostree_gpg_verify_result_require_valid_signature (result, error))
-            return FALSE;
+            {
+              if (out_signature_failed)
+                *out_signature_failed = TRUE;
+              return FALSE;
+            }
         }
     }
+#endif /* OSTREE_DISABLE_GPGME */
 
   if (signapi_summary_verifiers)
     {
@@ -2875,7 +2885,11 @@ _ostree_repo_verify_summary (OstreeRepo   *self,
                                                   signatures, FALSE);
 
           if (!_sign_verify_for_remote (signapi_summary_verifiers, summary, sig_variant, NULL, error))
-            return FALSE;
+            {
+              if (out_signature_failed)
+                *out_signature_failed = TRUE;
+              return FALSE;
+            }
         }
     }
 
@@ -6431,7 +6445,7 @@ repo_remote_fetch_summary_index (OstreeRepo    *self,
 
   if (!_ostree_repo_verify_summary (self, name,
                                     gpg_verify_summary, signapi_summary_verifiers,
-                                    index_b, index_sig_b,
+                                    index_b, index_sig_b, NULL,
                                     cancellable, error))
     return FALSE;
 
@@ -6621,7 +6635,7 @@ _ostree_repo_remote_fetch_indexed_summary (OstreeRepo    *self,
       /* Verify signatures (if needed) */
       if (!_ostree_repo_verify_summary (self, name,
                                         gpg_verify_summary, signapi_summary_verifiers,
-                                        subset_summary, subset_signatures,
+                                        subset_summary, subset_signatures, NULL,
                                         cancellable, error))
         return FALSE;
 
@@ -6807,7 +6821,7 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
 
   if (!_ostree_repo_verify_summary (self, name,
                                     gpg_verify_summary, signapi_summary_verifiers,
-                                    summary, signatures,
+                                    summary, signatures, NULL,
                                     cancellable, error))
       return FALSE;
 
