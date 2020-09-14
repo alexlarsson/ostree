@@ -48,6 +48,7 @@
 #include "ostree-autocleanups.h"
 #include "ostree-repo-finder.h"
 #include "ostree-repo-finder-avahi.h"
+#include "ostree-core-private.h"
 
 #ifdef HAVE_AVAHI
 #include "ostree-bloom-private.h"
@@ -581,9 +582,16 @@ fetch_summary_from_remote (OstreeRepo    *repo,
 {
   g_autoptr(GBytes) summary_bytes = NULL;
   gboolean remote_already_existed = _ostree_repo_add_remote (repo, remote);
+  g_auto(GVariantDict) options_dict = OT_VARIANT_BUILDER_INITIALIZER;
+  g_autoptr(GVariant) options = NULL;
+
+  g_variant_dict_init (&options_dict, NULL);
+  g_variant_dict_insert (&options_dict, "max-supported-version", "u", OSTREE_SUMMARY_VERSION_INDEXED);
+  options = g_variant_dict_end (&options_dict);
+
   gboolean success = ostree_repo_remote_fetch_summary_with_options (repo,
                                                                     remote->name,
-                                                                    NULL /* options */,
+                                                                    options,
                                                                     &summary_bytes,
                                                                     NULL /* signature */,
                                                                     cancellable,

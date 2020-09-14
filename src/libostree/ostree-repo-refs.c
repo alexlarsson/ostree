@@ -893,10 +893,16 @@ ostree_repo_remote_list_refs (OstreeRepo       *self,
 {
   g_autoptr(GBytes) summary_bytes = NULL;
   g_autoptr(GHashTable) ret_all_refs = NULL;
+  g_auto(GVariantDict) options_dict = OT_VARIANT_BUILDER_INITIALIZER;
+  g_autoptr(GVariant) options = NULL;
 
-  if (!ostree_repo_remote_fetch_summary (self, remote_name,
-                                         &summary_bytes, NULL,
-                                         cancellable, error))
+  g_variant_dict_init (&options_dict, NULL);
+  g_variant_dict_insert (&options_dict, "max-supported-version", "u", OSTREE_SUMMARY_VERSION_INDEXED);
+  options = g_variant_dict_end (&options_dict);
+
+  if (!ostree_repo_remote_fetch_summary_with_options (self, remote_name, options,
+                                                      &summary_bytes, NULL,
+                                                      cancellable, error))
     return FALSE;
 
   if (summary_bytes == NULL)
@@ -1021,10 +1027,16 @@ ostree_repo_remote_list_collection_refs (OstreeRepo    *self,
   g_autoptr(GVariant) summary_refs = NULL;
   const char *summary_collection_id;
   g_autoptr(GVariantIter) summary_collection_map = NULL;
+  g_auto(GVariantDict) options_dict = OT_VARIANT_BUILDER_INITIALIZER;
+  g_autoptr(GVariant) options = NULL;
 
-  if (!ostree_repo_remote_fetch_summary (self, remote_name,
-                                         &summary_bytes, NULL,
-                                         cancellable, error))
+  g_variant_dict_init (&options_dict, NULL);
+  g_variant_dict_insert (&options_dict, "max-supported-version", "u", OSTREE_SUMMARY_VERSION_INDEXED);
+  options = g_variant_dict_end (&options_dict);
+
+  if (!ostree_repo_remote_fetch_summary_with_options (self, remote_name, options,
+                                                      &summary_bytes, NULL,
+                                                      cancellable, error))
     return FALSE;
 
   if (summary_bytes == NULL)

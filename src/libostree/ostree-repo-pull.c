@@ -5441,6 +5441,12 @@ find_remotes_cb (GObject      *obj,
   g_autofree char **override_commit_ids = NULL;
   g_autoptr(GPtrArray) remotes_to_remove = NULL;  /* (element-type OstreeRemote) */
   g_autoptr(GPtrArray) final_results = NULL;  /* (element-type OstreeRepoFinderResult) */
+  g_auto(GVariantDict) summary_options_dict = OT_VARIANT_BUILDER_INITIALIZER;
+  g_autoptr(GVariant) summary_options = NULL;
+
+  g_variant_dict_init (&summary_options_dict, NULL);
+  g_variant_dict_insert (&summary_options_dict, "max-supported-version", "u", OSTREE_SUMMARY_VERSION_INDEXED);
+  summary_options = g_variant_dict_end (&summary_options_dict);
 
   task = G_TASK (user_data);
   self = OSTREE_REPO (g_task_get_source_object (task));
@@ -5515,13 +5521,14 @@ find_remotes_cb (GObject      *obj,
                G_STRFUNC, result->remote->name, result->remote->keyring);
 
       /* Download the summary. This will load from the cache if possible. */
-      ostree_repo_remote_fetch_summary_with_options (self,
-                                                     result->remote->name,
-                                                     NULL,  /* no options */
-                                                     &summary_bytes,
-                                                     NULL,
-                                                     cancellable,
-                                                     &error);
+      _ostree_repo_remote_fetch_summary (self,
+                                         result->remote->name,
+                                         summary_options,  /* no options */
+                                         &summary_bytes,
+                                         NULL,
+                                         &summary_last_modified,
+                                         cancellable,
+                                         &error);
 
       if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
         goto error;
@@ -5589,12 +5596,6 @@ find_remotes_cb (GObject      *obj,
 
       if (invalid_result)
         continue;
-
-      /* Check the summary timestamp. */
-      if (!g_variant_lookup (additional_metadata_v, OSTREE_SUMMARY_LAST_MODIFIED, "t", &summary_last_modified))
-        summary_last_modified = 0;
-      else
-        summary_last_modified = GUINT64_FROM_BE (summary_last_modified);
 
       /* Update the stored result data. Clear the @ref_to_checksum map, since
        * it’s been moved to @refs_and_remotes_table and is now potentially out
