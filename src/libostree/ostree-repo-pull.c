@@ -6380,6 +6380,7 @@ repo_remote_fetch_summary_index (OstreeRepo       *self,
                                  OstreeFetcher    *fetcher,
                                  GPtrArray        *mirrorlist,
                                  guint             n_network_retries,
+                                 gboolean          disable_cache,
                                  GVariant        **out_summary_idx,
                                  GVariant        **out_summary_idx_sig,
                                  GCancellable     *cancellable,
@@ -6395,7 +6396,8 @@ repo_remote_fetch_summary_index (OstreeRepo       *self,
   *out_summary_idx = NULL;
   *out_summary_idx_sig = NULL;
 
-  if (!_ostree_repo_load_cache_summary_index (self, name,
+  if (!disable_cache &&
+      !_ostree_repo_load_cache_summary_index (self, name,
                                               &cached_index, &cached_index_sig,
                                               cancellable, error))
     return FALSE;
@@ -6449,7 +6451,8 @@ repo_remote_fetch_summary_index (OstreeRepo       *self,
                                     cancellable, error))
     return FALSE;
 
-  if (!_ostree_repo_save_cache_summary_index (self, name, index_b, index_sig_b, cancellable, error))
+  if (!disable_cache &&
+      !_ostree_repo_save_cache_summary_index (self, name, index_b, index_sig_b, cancellable, error))
     return FALSE;
 
   *out_summary_idx = g_variant_ref_sink (g_variant_new_from_bytes (OSTREE_SUMMARY_INDEX_GVARIANT_FORMAT, index_b, FALSE));
@@ -6569,6 +6572,7 @@ _ostree_repo_remote_fetch_indexed_summary (OstreeRepo       *self,
                                            OstreeFetcher    *fetcher,
                                            GPtrArray        *mirrorlist,
                                            guint             n_network_retries,
+                                           gboolean          disable_cache,
                                            GVariant         *index,
                                            GVariant         *index_sig,
                                            GBytes          **out_summary,
@@ -6603,7 +6607,8 @@ _ostree_repo_remote_fetch_indexed_summary (OstreeRepo       *self,
     }
 
   /* Try local cache first */
-  if (!_ostree_repo_load_cache_summary_file (self, cache_name, NULL,
+  if (!disable_cache &&
+      !_ostree_repo_load_cache_summary_file (self, cache_name, NULL,
                                              &subset_summary, cancellable, error))
     return FALSE;
 
@@ -6640,7 +6645,8 @@ _ostree_repo_remote_fetch_indexed_summary (OstreeRepo       *self,
         return FALSE;
 
       /* Save to cache */
-      if (!_ostree_repo_save_cache_summary_file (self, cache_name, NULL,
+      if (!disable_cache &&
+          !_ostree_repo_save_cache_summary_file (self, cache_name, NULL,
                                                  subset_summary, cancellable, error))
         return FALSE;
 
@@ -6678,6 +6684,7 @@ _ostree_repo_remote_fetch_non_indexed_summary (OstreeRepo       *self,
                                                OstreeFetcher    *fetcher,
                                                GPtrArray        *mirrorlist,
                                                guint             n_network_retries,
+                                               gboolean          disable_cache,
                                                GBytes          **out_summary,
                                                GBytes          **out_signatures,
                                                guint64          *out_last_modified,
@@ -6712,7 +6719,7 @@ _ostree_repo_remote_fetch_non_indexed_summary (OstreeRepo       *self,
                                       error))
     return FALSE;
 
-  if (signatures)
+  if (signatures && !disable_cache)
     {
       if (!_ostree_repo_load_cache_summary_if_same_sig (self,
                                                         name,
@@ -6745,7 +6752,7 @@ _ostree_repo_remote_fetch_non_indexed_summary (OstreeRepo       *self,
                                     cancellable, error))
       return FALSE;
 
-  if (!summary_is_from_cache && summary && signatures)
+  if (!summary_is_from_cache && !disable_cache && summary && signatures)
     {
       g_autoptr(GError) temp_error = NULL;
 
@@ -6865,7 +6872,7 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
 
       if (!repo_remote_fetch_summary_index (self, name, metalink_url,
                                             gpg_verify_summary, signapi_summary_verifiers,
-                                            fetcher, mirrorlist, n_network_retries,
+                                            fetcher, mirrorlist, n_network_retries, FALSE,
                                             &index, &index_sig,
                                             cancellable, error))
         return FALSE;
@@ -6873,7 +6880,7 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
       if (index)
         return _ostree_repo_remote_fetch_indexed_summary (self, name, subset, metalink_url,
                                                           gpg_verify_summary, signapi_summary_verifiers,
-                                                          fetcher, mirrorlist, n_network_retries,
+                                                          fetcher, mirrorlist, n_network_retries, FALSE,
                                                           index, index_sig,
                                                           out_summary, out_signatures, out_last_modified,
                                                           cancellable, error);
@@ -6885,7 +6892,7 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
 
   return _ostree_repo_remote_fetch_non_indexed_summary (self, name, subset, metalink_url,
                                                         gpg_verify_summary, signapi_summary_verifiers,
-                                                        fetcher, mirrorlist, n_network_retries,
+                                                        fetcher, mirrorlist, n_network_retries, FALSE,
                                                         out_summary, out_signatures, out_last_modified,
                                                         cancellable, error);
 }
