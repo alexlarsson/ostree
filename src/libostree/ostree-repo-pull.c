@@ -6417,27 +6417,22 @@ repo_remote_fetch_summary_index (OstreeRepo    *self,
 
   /* Not a cache hit, or we need a signature and the cache did not have one. */
 
-  /* Download only if we're verifying summaries, because we don't want to cache
-   * or return signatures we don't know match the summary */
-  if (need_summary_signatures)
-    {
-      if (!_ostree_preload_metadata_file (self,
-                                          fetcher,
-                                          mirrorlist,
-                                          "summary.idx.sig",
-                                          metalink_url_string ? TRUE : FALSE,
-                                          n_network_retries,
-                                          &index_sig_b,
-                                          cancellable,
-                                          error))
-        return FALSE;
+  if (!_ostree_preload_metadata_file (self,
+                                      fetcher,
+                                      mirrorlist,
+                                      "summary.idx.sig",
+                                      metalink_url_string ? TRUE : FALSE,
+                                      n_network_retries,
+                                      &index_sig_b,
+                                      cancellable,
+                                      error))
+    return FALSE;
 
-      if (!_ostree_repo_verify_summary (self, name,
-                                        gpg_verify_summary, signapi_summary_verifiers,
-                                        index_b, index_sig_b,
-                                        cancellable, error))
-        return FALSE;
-    }
+  if (!_ostree_repo_verify_summary (self, name,
+                                    gpg_verify_summary, signapi_summary_verifiers,
+                                    index_b, index_sig_b,
+                                    cancellable, error))
+    return FALSE;
 
   if (!_ostree_repo_save_cache_summary_index (self, name, index_b, index_sig_b, cancellable, error))
     return FALSE;
