@@ -6694,6 +6694,8 @@ _ostree_repo_remote_fetch_non_indexed_summary (OstreeRepo       *self,
   gboolean summary_is_from_cache = FALSE;
   g_autoptr(GBytes) summary = NULL;
   g_autoptr(GBytes) signatures = NULL;
+  gboolean signature_failed = FALSE;
+  g_autoptr(GError) local_error = NULL;
 
   if (subset != NULL && *subset != 0)
     {
@@ -6734,6 +6736,7 @@ _ostree_repo_remote_fetch_non_indexed_summary (OstreeRepo       *self,
     summary_is_from_cache = TRUE;
   else
     {
+    retry_without_cache:
       if (!_ostree_preload_metadata_file (self,
                                           fetcher,
                                           mirrorlist,
@@ -6748,9 +6751,40 @@ _ostree_repo_remote_fetch_non_indexed_summary (OstreeRepo       *self,
 
   if (!_ostree_repo_verify_summary (self, name,
                                     gpg_verify_summary, signapi_summary_verifiers,
-                                    summary, signatures, NULL,
-                                    cancellable, error))
+                                    summary, signatures, &signature_failed,
+                                    cancellable, &local_error))
+    {
+      if (summary_is_from_cache && signature_failed)
+        {
+          /* Prior to commit c4c2b5eb the client would save the summary to the
+           * cache before validating the signature. That would mean the cache would
+           * have mismatched summary and signature and ostree would remain
+           * deadlocked there until the remote published a new signature.
+           * We now detect this and recover.
+           */
+          if ((self->test_error_flags & OSTREE_REPO_TEST_ERROR_INVALID_CACHE) > 0)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Remote %s cached summary invalid and "
+                           "OSTREE_REPO_TEST_ERROR_INVALID_CACHE specified",
+                           name);
+              return FALSE;
+            }
+          else
+            {
+              summary_is_from_cache = FALSE;
+              g_clear_error (&local_error);
+              g_clear_pointer (&summary, (GDestroyNotify)g_bytes_unref);
+              goto retry_without_cache;
+            }
+        }
+      else
+        {
+          g_propagate_error (error, g_steal_pointer (&local_error));
+          return FALSE;
+        }
       return FALSE;
+    }
 
   if (!summary_is_from_cache && !disable_cache && summary && signatures)
     {
