@@ -38,9 +38,10 @@ G_BEGIN_DECLS
 
 enum {
   OSTREE_SUMMARY_VERSION_ORIGINAL = 0,
+  OSTREE_SUMMARY_VERSION_INDEXED = 1,
 };
 
-#define OSTREE_SUMMARY_VERSION_LATEST OSTREE_SUMMARY_VERSION_ORIGINAL
+#define OSTREE_SUMMARY_VERSION_LATEST OSTREE_SUMMARY_VERSION_INDEXED
 
 /* This file contains private implementation data format definitions
  * read by multiple implementation .c files.

@@ -5157,6 +5157,131 @@ ostree_repo_sign_delta (OstreeRepo     *self,
   return FALSE;
 }
 
+#ifndef OSTREE_DISABLE_GPGME
+static gboolean
+sign_summary_data (OstreeRepo    *self,
+                   GBytes        *summary_data,
+                   const gchar   *sub_filename,
+                   const gchar  **key_id,
+                   const gchar   *homedir,
+                   GVariant     **metadata,
+                   GCancellable *cancellable,
+                   GError       **error)
+{
+  for (guint i = 0; key_id[i]; i++)
+    {
+      g_autoptr(GBytes) signature_data = NULL;
+      if (!sign_data (self, summary_data, key_id[i], homedir,
+                      &signature_data,
+                      cancellable, error))
+        return FALSE;
+
+      g_autoptr(GVariant) old_metadata = g_steal_pointer (metadata);
+
+      if (sub_filename)
+        {
+          g_autoptr(GVariant) old_sub_metadata = g_variant_lookup_value (old_metadata, sub_filename, OSTREE_SUMMARY_SIG_GVARIANT_FORMAT);
+          g_autoptr(GVariant) sub_metadata = _ostree_detached_metadata_append_gpg_sig (old_sub_metadata, signature_data);
+
+          GVariantDict new_metadata_dict;
+          g_variant_dict_init (&new_metadata_dict, old_metadata);
+          g_variant_dict_insert_value (&new_metadata_dict, sub_filename, sub_metadata);
+          *metadata = g_variant_ref_sink (g_variant_dict_end (&new_metadata_dict));
+        }
+      else
+        *metadata = _ostree_detached_metadata_append_gpg_sig (old_metadata, signature_data);
+    }
+
+  return TRUE;
+}
+#endif
+
+static gboolean
+sign_summary_file (OstreeRepo     *self,
+                   const gchar    **key_id,
+                   const gchar    *homedir,
+                   const char     *main_file,
+                   const char    **sub_files,
+                   const char     *sig_file,
+                   GCancellable   *cancellable,
+                   GError        **error)
+{
+#ifndef OSTREE_DISABLE_GPGME
+  glnx_autofd int fd = -1;
+  g_autoptr(GError) local_error = NULL;
+
+  if (!glnx_openat_rdonly (self->repo_dir_fd, main_file, TRUE, &fd, error))
+    return FALSE;
+
+  g_autoptr(GBytes) summary_data = ot_fd_readall_or_mmap (fd, 0, error);
+  if (!summary_data)
+    return FALSE;
+  /* Note that fd is reused below */
+  glnx_close_fd (&fd);
+
+  g_autoptr(GVariant) metadata = NULL;
+  if (!ot_openat_ignore_enoent (self->repo_dir_fd, sig_file, &fd, error))
+    return FALSE;
+  if (fd >= 0)
+    {
+      if (!ot_variant_read_fd (fd, 0, G_VARIANT_TYPE (OSTREE_SUMMARY_SIG_GVARIANT_STRING),
+                               FALSE, &metadata, error))
+        return FALSE;
+    }
+
+  if (!sign_summary_data (self, summary_data, NULL, key_id, homedir, &metadata, cancellable, error))
+    return FALSE;
+
+  if (sub_files != NULL)
+    {
+      for (guint i = 0; sub_files[i] != NULL; i++)
+        {
+          glnx_autofd int subfd = -1;
+          if (!glnx_openat_rdonly (self->repo_dir_fd, sub_files[i], FALSE, &subfd, error))
+            return FALSE;
+
+          g_autoptr(GBytes) sub_data = ot_fd_readall_or_mmap (subfd, 0, error);
+          if (!sub_data)
+            return FALSE;
+
+          if (!sign_summary_data (self, sub_data, sub_files[i], key_id, homedir, &metadata, cancellable, error))
+            return FALSE;
+        }
+    }
+
+  g_autoptr(GVariant) normalized = g_variant_get_normal_form (metadata);
+
+  if (!_ostree_repo_file_replace_contents (self,
+                                           self->repo_dir_fd,
+                                           sig_file,
+                                           g_variant_get_data (normalized),
+                                           g_variant_get_size (normalized),
+                                           cancellable, error))
+    return FALSE;
+
+  return TRUE;
+#else
+  return glnx_throw (error, "GPG feature is disabled in a build time");
+#endif /* OSTREE_DISABLE_GPGME */
+}
+
+GVariant *
+_ostree_repo_read_summary_index (OstreeRepo *self,
+                                 GError    **error)
+{
+  glnx_autofd int fd = -1;
+  g_autoptr(GVariant) index = NULL;
+
+  if (!glnx_openat_rdonly (self->repo_dir_fd, "summary.idx", TRUE, &fd, error))
+    return NULL;
+
+  if (!ot_variant_read_fd (fd, 0, OSTREE_SUMMARY_INDEX_GVARIANT_FORMAT,
+                           FALSE, &index, error))
+    return NULL;
+
+  return g_steal_pointer (&index);
+}
+
 /**
  * ostree_repo_add_gpg_signature_summary:
  * @self: Self
@@ -5174,52 +5299,37 @@ ostree_repo_add_gpg_signature_summary (OstreeRepo     *self,
                                        GCancellable   *cancellable,
                                        GError        **error)
 {
-#ifndef OSTREE_DISABLE_GPGME
-  glnx_autofd int fd = -1;
-  if (!glnx_openat_rdonly (self->repo_dir_fd, "summary", TRUE, &fd, error))
+  g_autoptr(GPtrArray) sub_files = NULL;
+  if (!sign_summary_file (self, key_id, homedir,
+                          "summary", NULL, "summary.sig",
+                          cancellable, error))
     return FALSE;
-  g_autoptr(GBytes) summary_data = ot_fd_readall_or_mmap (fd, 0, error);
-  if (!summary_data)
-    return FALSE;
-  /* Note that fd is reused below */
-  glnx_close_fd (&fd);
 
-  g_autoptr(GVariant) metadata = NULL;
-  if (!ot_openat_ignore_enoent (self->repo_dir_fd, "summary.sig", &fd, error))
-    return FALSE;
-  if (fd >= 0)
+  g_autoptr(GVariant) index = _ostree_repo_read_summary_index (self, NULL);
+  if (index != NULL)
     {
-      if (!ot_variant_read_fd (fd, 0, G_VARIANT_TYPE (OSTREE_SUMMARY_SIG_GVARIANT_STRING),
-                               FALSE, &metadata, error))
+      g_autoptr(GVariant) index_map = g_variant_get_child_value (index, 0);
+      sub_files = g_ptr_array_new_with_free_func (g_free);
+
+      for (guint i = 0; i < g_variant_n_children (index_map); i++)
+        {
+          g_autoptr(GVariant) subset = g_variant_get_child_value (index_map, i);
+          g_autoptr(GVariant) data = g_variant_get_child_value (subset, 1);
+          g_autoptr(GVariant) checksum_v = g_variant_get_child_value (data, 0);
+          g_autofree char *checksum = ostree_checksum_from_bytes_v (checksum_v);
+          g_autofree char *summary_path = g_strconcat ("summaries/", checksum, ".summary", NULL);
+          g_ptr_array_add (sub_files, g_steal_pointer (&summary_path));
+        }
+      g_ptr_array_add (sub_files, NULL);
+
+      if (!sign_summary_file (self, key_id, homedir,
+                              "summary.idx", sub_files ? (const char **)sub_files->pdata : NULL, "summary.idx.sig",
+                              cancellable, error))
         return FALSE;
     }
 
-  for (guint i = 0; key_id[i]; i++)
-    {
-      g_autoptr(GBytes) signature_data = NULL;
-      if (!sign_data (self, summary_data, key_id[i], homedir,
-                      &signature_data,
-                      cancellable, error))
-        return FALSE;
-
-      g_autoptr(GVariant) old_metadata = g_steal_pointer (&metadata);
-      metadata = _ostree_detached_metadata_append_gpg_sig (old_metadata, signature_data);
-    }
-
-  g_autoptr(GVariant) normalized = g_variant_get_normal_form (metadata);
-
-  if (!_ostree_repo_file_replace_contents (self,
-                                           self->repo_dir_fd,
-                                           "summary.sig",
-                                           g_variant_get_data (normalized),
-                                           g_variant_get_size (normalized),
-                                           cancellable, error))
-    return FALSE;
 
   return TRUE;
-#else
-  return glnx_throw (error, "GPG feature is disabled in a build time");
-#endif /* OSTREE_DISABLE_GPGME */
 }
 
 #ifndef OSTREE_DISABLE_GPGME
@@ -5665,11 +5775,48 @@ ostree_repo_verify_summary (OstreeRepo    *self,
 #endif /* OSTREE_DISABLE_GPGME */
 }
 
+static GVariant *
+_ostree_compute_variant_checksum_v (GVariant *variant)
+{
+  g_auto(OtChecksum) checksum = { 0, };
+  ot_checksum_init (&checksum);
+  ot_checksum_update (&checksum, g_variant_get_data (variant),
+                      g_variant_get_size (variant));
+
+  guint8 digest[_OSTREE_SHA256_DIGEST_LEN];
+  ot_checksum_get_digest (&checksum, digest, sizeof (digest));
+
+  return ot_gvariant_new_bytearray (digest, OSTREE_SHA256_DIGEST_LEN);
+}
+
+static guint
+_ostree_checksum_v_hash (gconstpointer value_)
+{
+  GVariant *value = (GVariant *) value_;
+  gsize len;
+  const guint8 *data, *end;
+  const guint8 *p;
+  guint32 h = 5381;
+
+  g_assert (g_variant_is_of_type (value, G_VARIANT_TYPE_BYTESTRING));
+
+  /* Same as g_str_hash, but for fixed length array */
+
+  data = g_variant_get_fixed_array (value, &len, 1);
+  end = data + len;
+
+  for (p = data; p < end; p++)
+    h = (h << 5) + h + *p;
+
+  return h;
+}
+
 /* Add an entry for a @ref ↦ @checksum mapping to an `a(s(t@ay@a{sv}))`
  * @refs_builder to go into a `summary` file. This includes building the
  * standard additional metadata keys for the ref. */
 static gboolean
 summary_add_ref_entry (OstreeRepo               *self,
+                       const char               *subset,  /* NULL == backwards compat, "" == everything, otherwise named subset */
                        const char               *collection_id,
                        const char               *ref,
                        const char               *checksum,
@@ -5677,6 +5824,7 @@ summary_add_ref_entry (OstreeRepo               *self,
                        gboolean                  new_commit_timestamp_key,
                        OstreeAddMetadataCallback metadata_callback,
                        gpointer                  user_data,
+                       GHashTable               *commit_cache,
                        GError                  **error)
 {
   g_auto(GVariantDict) commit_metadata_builder = OT_VARIANT_BUILDER_INITIALIZER;
@@ -5691,9 +5839,13 @@ summary_add_ref_entry (OstreeRepo               *self,
   if (remotename != NULL)
     return TRUE;
 
-  g_autoptr(GVariant) commit_obj = NULL;
-  if (!ostree_repo_load_variant (self, OSTREE_OBJECT_TYPE_COMMIT, checksum, &commit_obj, error))
-    return FALSE;
+  GVariant *commit_obj = g_hash_table_lookup (commit_cache, checksum);
+  if (commit_obj == NULL)
+    {
+      if (!ostree_repo_load_variant (self, OSTREE_OBJECT_TYPE_COMMIT, checksum, &commit_obj, error))
+        return FALSE;
+      g_hash_table_insert (commit_cache, g_strdup (checksum), commit_obj); /* passes ownership */
+    }
 
   g_variant_dict_init (&commit_metadata_builder, NULL);
 
@@ -5706,7 +5858,7 @@ summary_add_ref_entry (OstreeRepo               *self,
                                  g_variant_new_uint64 (GUINT64_TO_BE (commit_timestamp)));
 
   if (metadata_callback != NULL &&
-      !metadata_callback (self, OSTREE_SUMMARY_VERSION_ORIGINAL, collection_id, ref, checksum,
+      !metadata_callback (self, subset == NULL ? OSTREE_SUMMARY_VERSION_ORIGINAL : OSTREE_SUMMARY_VERSION_INDEXED, collection_id, ref, checksum,
                           &commit_metadata_builder, user_data, error))
     return FALSE;
 
@@ -5719,14 +5871,15 @@ summary_add_ref_entry (OstreeRepo               *self,
   return TRUE;
 }
 
-
 static GVariant *
 generate_summary (OstreeRepo               *self,
+                  const char               *subset, /* NULL == backwards compat, "" == everything, otherwise named subset */
                   GVariant                 *additional_metadata,
                   gboolean                  include_deltas,
                   gboolean                  new_commit_timestamp_key,
                   OstreeAddMetadataCallback metadata_callback,
                   gpointer                  user_data,
+                  GHashTable               *commit_cache,
                   GCancellable             *cancellable,
                   GError                  **error)
 {
@@ -5751,7 +5904,8 @@ generate_summary (OstreeRepo               *self,
             const char *ref = iter->data;
             const char *commit = g_hash_table_lookup (refs, ref);
 
-            if (!summary_add_ref_entry (self, NULL, ref, commit, refs_builder, new_commit_timestamp_key, metadata_callback, user_data, error))
+            if (!summary_add_ref_entry (self, subset, NULL, ref, commit, refs_builder, new_commit_timestamp_key,
+                                        metadata_callback, user_data, commit_cache, error))
               return NULL;
           }
       }
@@ -5789,10 +5943,19 @@ generate_summary (OstreeRepo               *self,
         g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_STATIC_DELTAS, g_variant_dict_end (&deltas_builder));
     }
 
-  {
-    g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_LAST_MODIFIED,
-                                 g_variant_new_uint64 (GUINT64_TO_BE (g_get_real_time () / G_USEC_PER_SEC)));
-  }
+  if (subset == NULL)
+    {
+      /* Only original format has last-modified in summary. Later version has this in the index instead so that
+         the individual summaries are reproducible. */
+      g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_LAST_MODIFIED,
+                                   g_variant_new_uint64 (GUINT64_TO_BE (g_get_real_time () / G_USEC_PER_SEC)));
+    }
+  else
+    {
+      /* We only add the version in summaries starting with version 1, to match the behaviour of previous versions */
+      g_variant_dict_insert_value (&additional_metadata_builder, OSTREE_SUMMARY_FORMAT_VERSION,
+                                   g_variant_new_uint32 (GUINT32_TO_BE (1)));
+    }
 
   /* Add refs which have a collection specified, which could be in refs/mirrors,
    * refs/heads, and/or refs/remotes. */
@@ -5854,7 +6017,8 @@ generate_summary (OstreeRepo               *self,
             const char *commit = g_hash_table_lookup (ref_map, ref);
             GVariantBuilder *builder = is_main_collection_id ? refs_builder : collection_refs_builder;
 
-            if (!summary_add_ref_entry (self, collection_id, ref, commit, builder, new_commit_timestamp_key, metadata_callback, user_data, error))
+            if (!summary_add_ref_entry (self, subset, collection_id, ref, commit, builder, new_commit_timestamp_key,
+                                        metadata_callback, user_data, commit_cache, error))
               return NULL;
 
             if (!is_main_collection_id)
@@ -5877,7 +6041,7 @@ generate_summary (OstreeRepo               *self,
   }
 
   if (metadata_callback != NULL &&
-      !metadata_callback (self, OSTREE_SUMMARY_VERSION_ORIGINAL, NULL, NULL, NULL,
+      !metadata_callback (self, subset == NULL ? OSTREE_SUMMARY_VERSION_ORIGINAL : OSTREE_SUMMARY_VERSION_INDEXED, NULL, NULL, NULL,
                           &additional_metadata_builder, user_data, error))
     return NULL;
 
@@ -5887,9 +6051,133 @@ generate_summary (OstreeRepo               *self,
   g_variant_builder_add_value (summary_builder, g_variant_builder_end (refs_builder));
   g_variant_builder_add_value (summary_builder, g_variant_dict_end (&additional_metadata_builder));
 
-  return g_variant_ref_sink (g_variant_builder_end (summary_builder));
+  g_autoptr(GVariant) summary = g_variant_ref_sink (g_variant_builder_end (summary_builder));
+
+  (void)g_variant_get_data (summary); /* Serialize summary */
+
+  return g_steal_pointer (&summary);
 }
 
+static GVariant *
+generate_index_history (const char *subset,
+                        GVariant *checksum_v,
+                        GVariant *old_index,
+                        int max_history_len)
+{
+  g_autoptr(GVariantBuilder) history_builder = g_variant_builder_new (G_VARIANT_TYPE ("aay"));
+  g_autoptr(GVariant) old_subset = NULL;
+  g_autoptr(GVariant) old_index_map = NULL;
+  g_autoptr(GVariant) parent_v = NULL;
+  g_autoptr(GVariant) old_history = NULL;
+  int i, n_from_history;
+  const guchar *parent;
+
+  if (old_index == NULL)
+    goto out;
+
+  old_index_map = g_variant_get_child_value (old_index, 0);
+  old_subset = g_variant_lookup_value (old_index_map, subset, G_VARIANT_TYPE ("(ayaay)"));
+
+  if (old_subset == NULL)
+    goto out;
+
+  parent_v = g_variant_get_child_value (old_subset, 0);
+  old_history = g_variant_get_child_value (old_subset, 1);
+
+  parent = ostree_checksum_bytes_peek_validate (parent_v, NULL);
+  if (parent == NULL)
+    goto out;
+
+  /* Don't add parent to history if its the same as new (i.e. there was no change for this subset) */
+  if (ostree_cmp_checksum_bytes (parent, ostree_checksum_bytes_peek (checksum_v)) != 0)
+    {
+      g_variant_builder_add_value (history_builder, parent_v);
+      max_history_len--; /* We added one, so keep one less */
+    }
+
+  n_from_history = MIN(max_history_len, g_variant_n_children (old_history));
+  for (i = 0; i < n_from_history; i++)
+    {
+      g_autoptr(GVariant) ancestor_v = g_variant_get_child_value (old_history, i);
+
+      if (ostree_checksum_bytes_peek_validate (ancestor_v, NULL) == NULL)
+        break;
+
+      g_variant_builder_add_value (history_builder, ancestor_v);
+    }
+
+ out:
+  return g_variant_builder_end (history_builder);
+}
+
+static void
+add_summaries_from_index (GVariant *index, GHashTable *used_summaries)
+{
+  g_autoptr(GVariant) index_map = g_variant_get_child_value (index, 0);
+  int i, len;
+
+  len = g_variant_n_children (index_map);
+  for (i = 0; i < len; i++)
+    {
+      g_autoptr(GVariant) element = g_variant_get_child_value (index_map, i);
+      g_autoptr(GVariant) value = g_variant_get_child_value (element, 1);
+      g_autoptr(GVariant) checksum = g_variant_get_child_value (value, 0);
+
+      g_hash_table_replace (used_summaries, g_variant_ref (checksum), checksum);
+    }
+}
+
+static gboolean
+prune_summaries (OstreeRepo *self,
+                 GVariant *index,
+                 GVariant *old_index,
+                 GCancellable *cancellable,
+                 GError **error)
+{
+  g_auto(GLnxDirFdIterator) dfd_iter = { 0, };
+  gboolean exists;
+
+  g_autoptr(GHashTable) used_summaries = g_hash_table_new_full (_ostree_checksum_v_hash, g_variant_equal,
+                                                                (GDestroyNotify) g_variant_unref, NULL);
+
+  /* We delete all the summaries not in use by the new or (if existing) old index */
+
+  add_summaries_from_index (index, used_summaries);
+  if (old_index)
+    add_summaries_from_index (old_index, used_summaries);
+
+  if (!ot_dfd_iter_init_allow_noent (self->repo_dir_fd, "summaries", &dfd_iter, &exists, error))
+    return FALSE;
+
+  if (!exists)
+    return TRUE;
+
+  while (TRUE)
+    {
+      struct dirent *dent;
+
+      if (!glnx_dirfd_iterator_next_dent_ensure_dtype (&dfd_iter, &dent, cancellable, error))
+        return FALSE;
+      if (dent == NULL)
+        break;
+      const char *name = dent->d_name;
+      if (dent->d_type != DT_REG ||
+          !g_str_has_suffix (name, ".summary") ||
+          strlen (name) != OSTREE_SHA256_STRING_LEN + strlen (".summary"))
+        continue;
+
+      GVariant *checksum_v = ostree_checksum_to_bytes_v (name); /* Note: This ignores the suffix of the name */
+
+      if (g_hash_table_lookup (used_summaries, checksum_v) == NULL)
+        {
+          g_debug ("Pruning old summary %s", dent->d_name);
+          if (!glnx_unlinkat (dfd_iter.fd, dent->d_name, 0, error))
+            return FALSE;
+        }
+    }
+
+  return TRUE;
+}
 
 /**
  * ostree_repo_regenerate_summary_with_options:
@@ -5953,10 +6241,17 @@ ostree_repo_regenerate_summary_with_options (OstreeRepo               *self,
   g_autoptr(OstreeRepoAutoLock) lock = NULL;
   gboolean no_deltas_in_summary = FALSE;
   gboolean new_commit_timestamp_key = FALSE;
+  int max_summary_format;
+  int i;
 
   if (!ot_keyfile_get_boolean_with_default (self->config, "core",
                                             "no-deltas-in-summary", FALSE,
                                             &no_deltas_in_summary, error))
+    return FALSE;
+
+  if (!ot_keyfile_get_integer_with_default (self->config, "core",
+                                            "max-summary-format-version", OSTREE_SUMMARY_VERSION_LATEST,
+                                            &max_summary_format, error))
     return FALSE;
 
   if (options)
@@ -5971,23 +6266,120 @@ ostree_repo_regenerate_summary_with_options (OstreeRepo               *self,
   if (!lock)
     return FALSE;
 
+  /* We cache the loaded commit objects, because with subsets and backwards compat we're
+   * loading the same thing several times */
+  g_autoptr(GHashTable) commit_cache = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_variant_unref);
 
-  g_autoptr(GVariant) summary = generate_summary (self, additional_metadata,
-                                                  !no_deltas_in_summary,
-                                                  new_commit_timestamp_key,
-                                                  metadata_callback, user_data,
-                                                  cancellable, error);
-  if (summary == NULL)
+  /* Index deltas */
+  if (!_ostree_repo_static_delta_reindex (self, NULL, cancellable, error))
     return FALSE;
 
-  if (!_ostree_repo_static_delta_reindex (self, NULL, cancellable, error))
+  /* Generate backwards compat non-indexed summary file */
+  g_autoptr(GVariant) old_summary = generate_summary (self, NULL, additional_metadata,
+                                                      !no_deltas_in_summary,
+                                                      new_commit_timestamp_key,
+                                                      metadata_callback, user_data,
+                                                      commit_cache, cancellable, error);
+  if (old_summary == NULL)
+    return FALSE;
+
+
+  /* Read old index (if available) */
+  g_autoptr(GVariant) old_index = _ostree_repo_read_summary_index (self, NULL);
+
+  if (max_summary_format >= OSTREE_SUMMARY_VERSION_INDEXED)
+    {
+      /* Generate indexed summaries, one per subset */
+
+      int max_history_len = 10; /* This needs to be an option later, being the number of deltas we create */
+
+      g_autoptr(GHashTable) new_summaries = g_hash_table_new_full (_ostree_checksum_v_hash, g_variant_equal,
+                                                                   (GDestroyNotify) g_variant_unref, (GDestroyNotify) g_variant_unref);
+      g_autoptr(GVariantBuilder) subset_builder = g_variant_builder_new (G_VARIANT_TYPE ("a{s(ayaay)}"));
+
+      const char *subsets[] = { "", NULL }; /* Only everything subset for now */
+      for (i = 0; subsets[i] != NULL; i++)
+        {
+          const char *subset = subsets[i];
+
+          g_autoptr(GVariant) new_summary = generate_summary (self, subset, additional_metadata,
+                                                              FALSE, TRUE,
+                                                              metadata_callback, user_data,
+                                                              commit_cache, cancellable, error);
+          if (new_summary == NULL)
+            return FALSE;
+
+          g_autoptr(GVariant) checksum_v = g_variant_ref_sink (_ostree_compute_variant_checksum_v (new_summary));
+
+          g_variant_builder_add (subset_builder, "{s(@ay@aay)}",
+                                 subset, checksum_v,
+                                 generate_index_history (subset, checksum_v, old_index, max_history_len));
+
+          g_hash_table_insert (new_summaries, g_steal_pointer (&checksum_v), g_steal_pointer (&new_summary));
+        }
+
+      g_autoptr(GVariantBuilder) index_builder = g_variant_builder_new (OSTREE_SUMMARY_INDEX_GVARIANT_FORMAT);
+
+      g_autoptr(GVariantDict) index_metadata_builder = g_variant_dict_new (NULL);
+      g_variant_dict_insert_value (index_metadata_builder, OSTREE_SUMMARY_LAST_MODIFIED,
+                                   g_variant_new_uint64 (GUINT64_TO_BE (g_get_real_time () / G_USEC_PER_SEC)));
+
+      g_variant_builder_add_value (index_builder, g_variant_builder_end (subset_builder));
+      g_variant_builder_add_value (index_builder, g_variant_dict_end (index_metadata_builder));
+
+      g_autoptr(GVariant) index = g_variant_ref_sink (g_variant_builder_end (index_builder));
+
+      if (!glnx_shutil_mkdir_p_at (self->repo_dir_fd, "summaries", DEFAULT_DIRECTORY_MODE, cancellable, error))
+        return FALSE;
+
+      GLNX_HASH_TABLE_FOREACH_KV (new_summaries, GVariant *, checksum_v, GVariant*, new_summary)
+        {
+          g_autofree char *checksum = ostree_checksum_from_bytes_v (checksum_v);
+          g_autofree char *new_summary_path = g_strconcat ("summaries/", checksum, ".summary", NULL);
+          struct stat stbuf;
+
+          /* No need to overwrite if it already exists (since it's stored by checksum) */
+          if (glnx_fstatat (self->repo_dir_fd, new_summary_path, &stbuf, 0, NULL))
+            continue;
+
+          if (!_ostree_repo_file_replace_contents (self,
+                                                   self->repo_dir_fd,
+                                                   new_summary_path,
+                                                   g_variant_get_data (new_summary),
+                                                   g_variant_get_size (new_summary),
+                                                   cancellable,
+                                                   error))
+            return FALSE;
+        }
+
+      if (!prune_summaries (self, index, old_index, cancellable, error))
+        return FALSE;
+
+      if (!_ostree_repo_file_replace_contents (self,
+                                               self->repo_dir_fd,
+                                               "summary.idx",
+                                               g_variant_get_data (index),
+                                               g_variant_get_size (index),
+                                               cancellable,
+                                               error))
+        return FALSE;
+
+    }
+  else
+    {
+      /* Remove leftover out-of date indexed summary */
+      if (!ot_ensure_unlinked_at (self->repo_dir_fd, "summary.idx", error))
+        return FALSE;
+    }
+
+  if (!ot_ensure_unlinked_at (self->repo_dir_fd, "summary.idx.sig", error))
     return FALSE;
 
   if (!_ostree_repo_file_replace_contents (self,
                                            self->repo_dir_fd,
                                            "summary",
-                                           g_variant_get_data (summary),
-                                           g_variant_get_size (summary),
+                                           g_variant_get_data (old_summary),
+                                           g_variant_get_size (old_summary),
                                            cancellable,
                                            error))
     return FALSE;

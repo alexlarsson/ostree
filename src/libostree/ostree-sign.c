@@ -583,6 +583,129 @@ ostree_sign_get_by_name (const gchar *name, GError **error)
   return sign;
 }
 
+static gboolean
+sign_data_with_keys (OstreeSign    *self,
+                     GBytes        *summary_data,
+                     GVariant      *keys,
+                     GVariant     **metadata,
+                     GCancellable  *cancellable,
+                     GError       **error)
+{
+  GVariantIter *iter;
+  GVariant *key;
+
+  g_variant_get (keys, "av", &iter);
+  while (g_variant_iter_loop (iter, "v", &key))
+    {
+      g_autoptr (GBytes) signature = NULL;
+
+      if (!ostree_sign_set_sk (self, key, error))
+        return FALSE;
+
+      if (!ostree_sign_data (self,
+                             summary_data,
+                             &signature,
+                             cancellable,
+                             error))
+        return FALSE;
+
+      g_autoptr(GVariant) old_metadata = g_steal_pointer (metadata);
+      *metadata =
+        _sign_detached_metadata_append (self, old_metadata, signature);
+    }
+  g_variant_iter_free (iter);
+
+  return TRUE;
+}
+
+static gboolean
+sign_summary_file (OstreeSign    *self,
+                   OstreeRepo    *repo,
+                   GVariant      *keys,
+                   const char     *main_file,
+                   const char    **sub_files,
+                   const char     *sig_file,
+                   GCancellable  *cancellable,
+                   GError       **error)
+{
+  g_return_val_if_fail (OSTREE_IS_SIGN (self), FALSE);
+  g_return_val_if_fail (OSTREE_IS_REPO (repo), FALSE);
+
+  g_autoptr(GVariant) normalized = NULL;
+  g_autoptr(GBytes) summary_data = NULL;
+  g_autoptr(GVariant) metadata = NULL;
+
+  glnx_autofd int fd = -1;
+  if (!glnx_openat_rdonly (repo->repo_dir_fd, main_file, TRUE, &fd, error))
+    return FALSE;
+  summary_data = ot_fd_readall_or_mmap (fd, 0, error);
+  if (!summary_data)
+    return FALSE;
+
+  /* Note that fd is reused below */
+  glnx_close_fd (&fd);
+
+  if (!ot_openat_ignore_enoent (repo->repo_dir_fd, "summary.sig", &fd, error))
+    return FALSE;
+
+  if (fd >= 0)
+    {
+      if (!ot_variant_read_fd (fd, 0, OSTREE_SUMMARY_SIG_GVARIANT_FORMAT,
+                               FALSE, &metadata, error))
+        return FALSE;
+    }
+
+  if (g_variant_n_children(keys) == 0)
+    return glnx_throw (error, "No keys passed for signing summary");
+
+  if (!sign_data_with_keys (self, summary_data, keys, &metadata, cancellable, error))
+    return FALSE;
+
+  if (sub_files != NULL)
+    {
+      for (guint i = 0; sub_files[i] != NULL; i++)
+        {
+          const char *sub_filename = sub_files[i];
+          glnx_autofd int subfd = -1;
+          GVariantDict new_metadata_dict;
+          g_autoptr(GVariant) sub_metadata = NULL;
+
+          if (metadata)
+            sub_metadata = g_variant_lookup_value (metadata, sub_filename, OSTREE_SUMMARY_SIG_GVARIANT_FORMAT);
+
+          if (!glnx_openat_rdonly (repo->repo_dir_fd, sub_files[i], FALSE, &subfd, error))
+            return FALSE;
+
+          g_autoptr(GBytes) sub_data = ot_fd_readall_or_mmap (subfd, 0, error);
+          if (!sub_data)
+            return FALSE;
+
+          if (!sign_data_with_keys (self, sub_data, keys, &sub_metadata, cancellable, error))
+            return FALSE;
+
+          {g_autoptr(GVariant) normalized = g_variant_get_normal_form (sub_metadata);}
+
+          g_autoptr(GVariant) old_metadata = g_steal_pointer (&metadata);
+
+          g_variant_dict_init (&new_metadata_dict, old_metadata);
+          g_variant_dict_insert_value (&new_metadata_dict, sub_filename, sub_metadata);
+          metadata = g_variant_ref_sink (g_variant_dict_end (&new_metadata_dict));
+        }
+    }
+
+  normalized = g_variant_get_normal_form (metadata);
+  if (!_ostree_repo_file_replace_contents (repo,
+                                           repo->repo_dir_fd,
+                                           sig_file,
+                                           g_variant_get_data (normalized),
+                                           g_variant_get_size (normalized),
+                                           cancellable, error))
+    return FALSE;
+
+  return TRUE;
+}
+
+
 /**
  * ostree_sign_summary:
  * @self: Self
@@ -605,68 +728,34 @@ ostree_sign_summary (OstreeSign    *self,
                      GCancellable  *cancellable,
                      GError       **error)
 {
-  g_return_val_if_fail (OSTREE_IS_SIGN (self), FALSE);
-  g_return_val_if_fail (OSTREE_IS_REPO (repo), FALSE);
-
-  g_autoptr(GVariant) normalized = NULL;
-  g_autoptr(GBytes) summary_data = NULL;
-  g_autoptr(GVariant) metadata = NULL;
-
-  glnx_autofd int fd = -1;
-  if (!glnx_openat_rdonly (repo->repo_dir_fd, "summary", TRUE, &fd, error))
-    return FALSE;
-  summary_data = ot_fd_readall_or_mmap (fd, 0, error);
-  if (!summary_data)
+  g_autoptr(GPtrArray) sub_files = NULL;
+  if (!sign_summary_file (self, repo, keys,
+                          "summary", NULL, "summary.sig",
+                          cancellable, error))
     return FALSE;
 
-  /* Note that fd is reused below */
-  glnx_close_fd (&fd);
-
-  if (!ot_openat_ignore_enoent (repo->repo_dir_fd, "summary.sig", &fd, error))
-    return FALSE;
-
-  if (fd >= 0)
+  g_autoptr(GVariant) index = _ostree_repo_read_summary_index (repo, NULL);
+  if (index != NULL)
     {
-      if (!ot_variant_read_fd (fd, 0, OSTREE_SUMMARY_SIG_GVARIANT_FORMAT,
-                               FALSE, &metadata, error))
+      g_autoptr(GVariant) index_map = g_variant_get_child_value (index, 0);
+      sub_files = g_ptr_array_new_with_free_func (g_free);
+
+      for (guint i = 0; i < g_variant_n_children (index_map); i++)
+        {
+          g_autoptr(GVariant) subset = g_variant_get_child_value (index_map, i);
+          g_autoptr(GVariant) data = g_variant_get_child_value (subset, 1);
+          g_autoptr(GVariant) checksum_v = g_variant_get_child_value (data, 0);
+          g_autofree char *checksum = ostree_checksum_from_bytes_v (checksum_v);
+          g_autofree char *summary_path = g_strconcat ("summaries/", checksum, ".summary", NULL);
+          g_ptr_array_add (sub_files, g_steal_pointer (&summary_path));
+        }
+      g_ptr_array_add (sub_files, NULL);
+
+      if (!sign_summary_file (self, repo, keys,
+                              "summary.idx", sub_files ? (const char **)sub_files->pdata : NULL, "summary.idx.sig",
+                              cancellable, error))
         return FALSE;
     }
-
-  if (g_variant_n_children(keys) == 0)
-    return glnx_throw (error, "No keys passed for signing summary");
-
-  GVariantIter *iter;
-  GVariant *key;
-
-  g_variant_get (keys, "av", &iter);
-  while (g_variant_iter_loop (iter, "v", &key))
-    {
-      g_autoptr (GBytes) signature = NULL;
-
-      if (!ostree_sign_set_sk (self, key, error))
-        return FALSE;
-
-      if (!ostree_sign_data (self,
-                             summary_data,
-                             &signature,
-                             cancellable,
-                             error))
-        return FALSE;
-
-      g_autoptr(GVariant) old_metadata = g_steal_pointer (&metadata);
-      metadata =
-        _sign_detached_metadata_append (self, old_metadata, signature);
-    }
-  g_variant_iter_free (iter);
-
-  normalized = g_variant_get_normal_form (metadata);
-  if (!_ostree_repo_file_replace_contents (repo,
-                                           repo->repo_dir_fd,
-                                           "summary.sig",
-                                           g_variant_get_data (normalized),
-                                           g_variant_get_size (normalized),
-                                           cancellable, error))
-    return FALSE;
 
   return TRUE;
 }
