@@ -6229,6 +6229,416 @@ ostree_repo_pull_from_remotes_finish (OstreeRepo    *self,
   return g_task_propagate_boolean (G_TASK (result), error);
 }
 
+static gboolean
+_ostree_repo_load_cache_summary_index (OstreeRepo        *self,
+                                       const char        *remote,
+                                       GVariant         **out_index,
+                                       GVariant         **out_index_sig,
+                                       GCancellable      *cancellable,
+                                       GError           **error)
+{
+  g_autoptr(GBytes) data = NULL;
+  g_autoptr(GVariant) container = NULL;
+  g_autoptr(GVariant) index_datav = NULL;
+  g_autoptr(GBytes) index_data = NULL;
+  g_autoptr(GVariant) index_sig_datav = NULL;
+  g_autoptr(GBytes) index_sig_data = NULL;
+
+  *out_index = NULL;
+  *out_index_sig = NULL;
+
+  if (!_ostree_repo_load_cache_summary_file (self, remote, ".idx", &data,
+                                             cancellable, error))
+    return FALSE;
+
+  if (data == NULL)
+    return TRUE;
+
+  container = g_variant_ref_sink (g_variant_new_from_bytes (G_VARIANT_TYPE ("(ayay)"), data, FALSE));
+  index_datav = g_variant_get_child_value (container, 0);
+  index_data = g_variant_get_data_as_bytes (index_datav);
+  index_sig_datav = g_variant_get_child_value (container, 1);
+  index_sig_data = g_variant_get_data_as_bytes (index_sig_datav);
+
+  *out_index = g_variant_ref_sink (g_variant_new_from_bytes (OSTREE_SUMMARY_INDEX_GVARIANT_FORMAT,
+                                                             index_data, FALSE));
+  if (g_bytes_get_size (index_sig_data) == 0)
+    *out_index_sig = NULL;
+  else
+    *out_index_sig = g_variant_ref_sink (g_variant_new_from_bytes (OSTREE_SUMMARY_SIG_GVARIANT_FORMAT,
+                                                                   index_sig_data, FALSE));
+
+  return TRUE;
+}
+
+static gboolean
+_ostree_repo_save_cache_summary_index (OstreeRepo        *self,
+                                       const char        *remote,
+                                       GBytes            *summary_idx,
+                                       GBytes            *summary_idx_sig,
+                                       GCancellable      *cancellable,
+                                       GError           **error)
+{
+  if (self->cache_dir_fd == -1)
+    return TRUE;
+
+  if (!glnx_shutil_mkdir_p_at (self->cache_dir_fd, _OSTREE_SUMMARY_CACHE_DIR, DEFAULT_DIRECTORY_MODE, cancellable, error))
+    return FALSE;
+
+  const char *index_cache_file = glnx_strjoina (_OSTREE_SUMMARY_CACHE_DIR, "/", remote, ".idx");
+
+  /* We store both the summary and the signatures in a single cache file, because this way
+   * we avoid atomicity problems for concurrent updates. We just serialize it as two byte-array
+   * files, using an empty one for the signature if there is none.
+   */
+  g_autoptr(GVariant) data = g_variant_new ("(@ay@ay)",
+                                            ot_gvariant_new_ay_bytes (summary_idx),
+                                            summary_idx_sig ?
+                                            ot_gvariant_new_ay_bytes (summary_idx_sig) :
+                                            ot_gvariant_new_bytearray (NULL, 0));
+
+  if (!glnx_file_replace_contents_at (self->cache_dir_fd,
+                                      index_cache_file,
+                                      g_variant_get_data (data),
+                                      g_variant_get_size (data),
+                                      self->disable_fsync ? GLNX_FILE_REPLACE_NODATASYNC : GLNX_FILE_REPLACE_DATASYNC_NEW,
+                                      cancellable, error))
+    return FALSE;
+
+  return TRUE;
+}
+
+static gboolean
+variant_has_data (GVariant *variant,
+                  GBytes   *data)
+{
+  g_autoptr(GBytes) v_data = NULL;
+
+  if (variant == NULL)
+    return data == NULL;
+
+  if (data == NULL)
+    return FALSE;
+
+  v_data = g_variant_get_data_as_bytes (variant);
+  return g_bytes_compare (v_data, data) == 0;
+}
+
+static GVariant *
+summary_index_find_subset (GVariant   *index,
+                           const char *subset)
+{
+  g_autoptr(GVariant) index_map = g_variant_get_child_value (index, 0);
+  g_autoptr(GVariant) subset_data = NULL;
+
+  if (subset == NULL)
+    subset = "";
+
+  for (guint i = 0; i < g_variant_n_children (index_map); i++)
+    {
+      g_autoptr(GVariant) elt = g_variant_get_child_value (index_map, i);
+      const char *elt_subset;
+
+      g_variant_get_child (elt, 0, "&s", &elt_subset);
+      if (strcmp (elt_subset, subset) == 0)
+        return g_variant_get_child_value (elt, 1);
+    }
+
+  return NULL;
+}
+
+static gboolean
+repo_remote_fetch_summary_index (OstreeRepo    *self,
+                                 const char    *name,
+                                 const char    *metalink_url_string,
+                                 gboolean      gpg_verify_summary,
+                                 GPtrArray    *signapi_summary_verifiers,
+                                 OstreeFetcher *fetcher,
+                                 GPtrArray     *mirrorlist,
+                                 guint          n_network_retries,
+                                 GVariant     **out_summary_idx,
+                                 GVariant     **out_summary_idx_sig,
+                                 GCancellable  *cancellable,
+                                 GError       **error)
+{
+  g_autoptr(GVariant) cached_index = NULL;
+  g_autoptr(GVariant) cached_index_sig = NULL;
+  g_autoptr(GBytes) index_sig_b = NULL;
+  g_autoptr(GBytes) index_b = NULL;
+  gboolean cache_hit;
+  gboolean need_summary_signatures = gpg_verify_summary || signapi_summary_verifiers;
+
+  *out_summary_idx = NULL;
+  *out_summary_idx_sig = NULL;
+
+  if (!_ostree_repo_load_cache_summary_index (self, name,
+                                              &cached_index, &cached_index_sig,
+                                              cancellable, error))
+    return FALSE;
+
+  if (!_ostree_preload_metadata_file (self,
+                                      fetcher,
+                                      mirrorlist,
+                                      "summary.idx",
+                                      metalink_url_string ? TRUE : FALSE,
+                                      n_network_retries,
+                                      &index_b,
+                                      cancellable,
+                                      error))
+    return FALSE;
+
+  if (index_b == NULL)
+    return TRUE; /* No index online, not much we can do.. */
+
+  /* If the index matches the cache we know it is valid, and at the time
+     the cache was created, either the cache has a matching signature, or
+     it had no signture. */
+  cache_hit = variant_has_data (cached_index, index_b);
+
+  if (cache_hit &&
+      (cached_index_sig != NULL || !need_summary_signatures))
+    {
+      /* We can use it if it has a cached signature (as we know it matches),
+       * or if we don't need the signature to verify the summary.
+       */
+      *out_summary_idx = g_steal_pointer (&cached_index);
+      *out_summary_idx_sig = g_steal_pointer (&cached_index_sig);
+      return TRUE;
+    }
+
+  /* Not a cache hit, or we need a signature and the cache did not have one. */
+
+  /* Download only if we're verifying summaries, because we don't want to cache
+   * or return signatures we don't know match the summary */
+  if (need_summary_signatures)
+    {
+      if (!_ostree_preload_metadata_file (self,
+                                          fetcher,
+                                          mirrorlist,
+                                          "summary.idx.sig",
+                                          metalink_url_string ? TRUE : FALSE,
+                                          n_network_retries,
+                                          &index_sig_b,
+                                          cancellable,
+                                          error))
+        return FALSE;
+
+      if (!_ostree_repo_verify_summary (self, name,
+                                        gpg_verify_summary, signapi_summary_verifiers,
+                                        index_b, index_sig_b,
+                                        cancellable, error))
+        return FALSE;
+    }
+
+  if (!_ostree_repo_save_cache_summary_index (self, name, index_b, index_sig_b, cancellable, error))
+    return FALSE;
+
+  *out_summary_idx = g_variant_ref_sink (g_variant_new_from_bytes (OSTREE_SUMMARY_INDEX_GVARIANT_FORMAT, index_b, FALSE));
+  if (index_sig_b)
+    *out_summary_idx_sig = g_variant_ref_sink (g_variant_new_from_bytes (OSTREE_SUMMARY_SIG_GVARIANT_FORMAT, index_sig_b, FALSE));
+  else
+    *out_summary_idx_sig = NULL;
+
+  return TRUE;
+}
+
+typedef struct {
+  gint64 mtime;
+  char filename[1];
+} SummaryFileMtime;
+
+
+static SummaryFileMtime *
+summary_file_mtime_new (const char *filename,
+                        gint64      mtime)
+{
+  SummaryFileMtime *s;
+  gsize filename_len = strlen (filename);
+
+  /* Note: no + 1 for filename terminating null, because
+   * one char is already part of the filename in the struct */
+  s = g_malloc0 (sizeof (SummaryFileMtime) + filename_len);
+  s->mtime = mtime;
+  memcpy (&s->filename[0], filename, filename_len+1);
+  return s;
+}
+
+/* Sorts the files - newest first */
+static int
+summaries_cmp_by_mtime (gconstpointer _a,
+                        gconstpointer _b)
+{
+  const SummaryFileMtime *a = *(SummaryFileMtime **) _a;
+  const SummaryFileMtime *b = *(SummaryFileMtime **) _b;
+
+  return (int)(b->mtime - a->mtime);
+}
+
+/* We GC the indexed cache summary purely by mtime and remote name,
+ * ignoring the version we just saved. This is much simpler than
+ * doing a full mark-and-sweep, and in practice there almost always
+ * really is only one summary for the remote (the latest one for
+ * the subset typically used for the remote.
+ *
+ * For the corner case where e.g. multiple subsets are used for the
+ * same remote, races, etc, we save a few indexes with newest mtime.
+ */
+static gboolean
+_ostree_repo_gc_cache_summary (OstreeRepo        *self,
+                               const char        *remote,
+                               const char        *dont_gc,
+                               GCancellable      *cancellable,
+                               GError           **error)
+{
+  const char *remote_prefix = glnx_strjoina (remote, "-");
+  g_auto(GLnxDirFdIterator) dfd_iter = { 0, };
+  gboolean exists;
+  g_autoptr(GPtrArray) old_summaries = g_ptr_array_new_with_free_func (g_free);
+
+  if (self->cache_dir_fd == -1)
+    return TRUE;
+
+  if (!ot_dfd_iter_init_allow_noent (self->cache_dir_fd, _OSTREE_SUMMARY_CACHE_DIR, &dfd_iter, &exists, error))
+    return FALSE;
+
+  /* Note early return */
+  if (!exists)
+    return TRUE;
+
+  while (TRUE)
+    {
+      struct dirent *dent;
+      struct stat stbuf;
+
+      if (!glnx_dirfd_iterator_next_dent_ensure_dtype (&dfd_iter, &dent, cancellable, error))
+        return FALSE;
+      if (dent == NULL)
+        break;
+
+      const char *name = dent->d_name;
+
+      if (dent->d_type != DT_REG ||
+          !g_str_has_suffix (name, ".summary") ||
+          !g_str_has_prefix (name, remote_prefix) ||
+          g_strcmp0 (name, dont_gc) == 0)
+        continue;
+
+      if (fstatat (dfd_iter.fd, name, &stbuf, AT_SYMLINK_NOFOLLOW) == 0)
+        g_ptr_array_add (old_summaries,
+                         summary_file_mtime_new (name, stbuf.st_mtime));
+    }
+
+  g_ptr_array_sort (old_summaries, summaries_cmp_by_mtime);
+
+  /* Keep the 3 most recent old summaries */
+  for (guint i = 3; i < old_summaries->len; i++)
+    {
+      SummaryFileMtime *old_summary = g_ptr_array_index (old_summaries, i);
+      (void)glnx_unlinkat (dfd_iter.fd, old_summary->filename, 0, NULL);
+    }
+
+  return TRUE;
+}
+
+static gboolean
+_ostree_repo_remote_fetch_indexed_summary (OstreeRepo    *self,
+                                           const char    *name,
+                                           const char    *subset,
+                                           const char    *metalink_url_string,
+                                           gboolean      gpg_verify_summary,
+                                           GPtrArray    *signapi_summary_verifiers,
+                                           OstreeFetcher *fetcher,
+                                           GPtrArray     *mirrorlist,
+                                           guint          n_network_retries,
+                                           GVariant     *index,
+                                           GVariant     *index_sig,
+                                           GBytes       **out_summary,
+                                           GBytes       **out_signatures,
+                                           GCancellable  *cancellable,
+                                           GError       **error)
+{
+  g_autoptr(GVariant) subset_info = summary_index_find_subset (index, subset);
+  g_autoptr(GBytes) subset_summary = NULL;
+  g_autoptr(GBytes) subset_signatures = NULL;
+
+  if (subset_info == NULL)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                   "No such subset `%s` in repository summary", subset);
+      return FALSE;
+    }
+
+  g_autoptr(GVariant) summary_csum_v = g_variant_get_child_value (subset_info, 0);
+  g_autofree char *summary_csum = ostree_checksum_from_bytes_v (summary_csum_v);
+  const char *subset_path = glnx_strjoina ("summaries/", summary_csum, ".summary");
+  const char *cache_name = glnx_strjoina (name, "-", summary_csum, ".summary");
+
+  /* Look up gpg signature in index */
+  if (index_sig)
+    {
+      g_autoptr(GVariant) subset_summary_sig = g_variant_lookup_value (index_sig, subset_path, OSTREE_SUMMARY_SIG_GVARIANT_FORMAT);
+      if (subset_summary_sig)
+        subset_signatures = g_variant_get_data_as_bytes (subset_summary_sig);
+    }
+
+  /* Try local cache first */
+  if (!_ostree_repo_load_cache_summary_file (self, cache_name, NULL,
+                                             &subset_summary, cancellable, error))
+    return FALSE;
+
+  if (subset_summary == NULL)
+    {
+      guint8 actual_digest[OSTREE_SHA256_DIGEST_LEN];
+
+      /* Not in cache, download */
+      if (!_ostree_preload_metadata_file (self, fetcher, mirrorlist, subset_path,
+                                          metalink_url_string ? TRUE : FALSE,
+                                          n_network_retries, &subset_summary,
+                                          cancellable, error))
+        return FALSE;
+
+      if (subset_summary == NULL)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Summary `%s` specified by index missing in remote %s", summary_csum, name);
+          return FALSE;
+        }
+
+      /* Verify checksum */
+      ot_checksum_bytes (subset_summary, actual_digest);
+      if (ostree_cmp_checksum_bytes (actual_digest, ostree_checksum_bytes_peek (summary_csum_v)) != 0)
+        {
+          g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Invalid checksum for summary %s in remote %s", summary_csum, name);
+          return FALSE;
+        }
+
+      /* Verify signatures (if needed) */
+      if (!_ostree_repo_verify_summary (self, name,
+                                        gpg_verify_summary, signapi_summary_verifiers,
+                                        subset_summary, subset_signatures,
+                                        cancellable, error))
+        return FALSE;
+
+      /* Save to cache */
+      if (!_ostree_repo_save_cache_summary_file (self, cache_name, NULL,
+                                                 subset_summary, cancellable, error))
+        return FALSE;
+
+      if (!_ostree_repo_gc_cache_summary (self, name, cache_name, cancellable, error))
+        return FALSE;
+    }
+
+  if (out_summary != NULL)
+    *out_summary = g_steal_pointer (&subset_summary);
+
+  if (out_signatures != NULL)
+    *out_signatures = g_steal_pointer (&subset_signatures);
+
+  return TRUE;
+}
+
+
+
+
 /**
  * ostree_repo_remote_fetch_summary_with_options:
  * @self: Self
@@ -6250,6 +6660,8 @@ ostree_repo_pull_from_remotes_finish (OstreeRepo    *self,
  * - n-network-retries (u): Number of times to retry each download on receiving
  *   a transient network error, such as a socket timeout; default is 5, 0
  *   means return errors without retrying
+ * - max-supported-version (u): Don't return summary file with a higher format version than this.
+ * - subset (s): The subset to download the summary for, "" means no subset
  *
  * Returns: %TRUE on success, %FALSE on failure
  *
@@ -6277,6 +6689,8 @@ ostree_repo_remote_fetch_summary_with_options (OstreeRepo    *self,
   g_autoptr(GPtrArray) mirrorlist = NULL;
   const char *append_user_agent = NULL;
   guint n_network_retries = DEFAULT_N_NETWORK_RETRIES;
+  const char *subset = NULL;
+  guint max_supported_version = 0;
 
   g_return_val_if_fail (OSTREE_REPO (self), FALSE);
   g_return_val_if_fail (name != NULL, FALSE);
@@ -6291,7 +6705,12 @@ ostree_repo_remote_fetch_summary_with_options (OstreeRepo    *self,
       (void) g_variant_lookup (options, "http-headers", "@a(ss)", &extra_headers);
       (void) g_variant_lookup (options, "append-user-agent", "&s", &append_user_agent);
       (void) g_variant_lookup (options, "n-network-retries", "u", &n_network_retries);
+      (void) g_variant_lookup (options, "max-supported-version", "u", &max_supported_version);
+      (void) g_variant_lookup (options, "subset", "&s", &subset);
     }
+
+  if (subset == NULL)
+    subset = "";
 
   if (!ostree_repo_remote_get_gpg_verify_summary (self, name, &gpg_verify_summary, error))
     return FALSE;
@@ -6321,6 +6740,40 @@ ostree_repo_remote_fetch_summary_with_options (OstreeRepo    *self,
                                           fetcher, n_network_retries,
                                           &mirrorlist, cancellable, error))
     return FALSE;
+
+  if (max_supported_version >= OSTREE_SUMMARY_VERSION_INDEXED)
+    {
+      /* Use the index */
+      g_autoptr(GVariant) index = NULL;
+      g_autoptr(GVariant) index_sig = NULL;
+
+      if (!repo_remote_fetch_summary_index (self, name, metalink_url_string,
+                                            gpg_verify_summary, signapi_summary_verifiers,
+                                            fetcher, mirrorlist, n_network_retries,
+                                            &index, &index_sig,
+                                            cancellable, error))
+        return FALSE;
+
+      if (index)
+        return _ostree_repo_remote_fetch_indexed_summary (self, name, subset, metalink_url_string,
+                                                          gpg_verify_summary, signapi_summary_verifiers,
+                                                          fetcher, mirrorlist, n_network_retries,
+                                                          index, index_sig,
+                                                          out_summary, out_signatures,
+                                                          cancellable, error);
+
+      /* No index, fall back */
+    }
+
+  /* Handle OSTREE_SUMMARY_VERSION_ORIGINAL versions */
+
+  if (*subset != 0)
+    {
+      /* There are no subsets in the old format */
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
+                   "No such subset `%s` in repository summary", subset);
+      return FALSE;
+    }
 
   /* FIXME: Send the ETag from the cache with the request for summary.sig to
    * avoid downloading summary.sig unnecessarily. This won’t normally provide
