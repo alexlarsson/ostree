@@ -53,6 +53,8 @@ ostree_repo_init repo --mode=archive
 ${CMD_PREFIX} ostree --repo=repo remote add --set=gpg-verify=false origin $(cat httpd-address)/ostree/gnomerepo
 ${CMD_PREFIX} ostree --repo=repo pull --mirror origin
 assert_has_file repo/summary
+assert_has_file repo/summary.idx
+assert_has_file repo/summaries/*.summary
 ${CMD_PREFIX} ostree --repo=repo checkout -U main main-copy
 assert_file_has_content main-copy/baz/cow "moo"
 ${CMD_PREFIX} ostree --repo=repo checkout -U other other-copy
@@ -99,6 +101,8 @@ ${OSTREE} --repo=repo remote add --set=gpg-verify-summary=true origin $(cat http
 ${OSTREE} --repo=repo pull --mirror origin
 assert_has_file repo/summary
 assert_has_file repo/summary.sig
+assert_has_file repo/summary.idx
+assert_has_file repo/summary.idx.sig
 echo "ok pull mirror with signed summary"
 
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{,.good}
@@ -112,6 +116,8 @@ ${OSTREE} --repo=repo remote add origin $(cat httpd-address)/ostree/gnomerepo
 ${OSTREE} --repo=repo pull --mirror origin
 assert_has_file repo/summary
 assert_has_file repo/summary.sig
+assert_has_file repo/summary.idx
+assert_has_file repo/summary.idx.sig
 mv ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{.good,}
 echo "ok pull mirror with invalid summary sig and no verification"
 

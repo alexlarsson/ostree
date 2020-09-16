@@ -26,7 +26,7 @@ set -euo pipefail
 COMMIT_SIGN=""
 if has_gpgme; then
     COMMIT_SIGN="--gpg-homedir=${TEST_GPG_KEYHOME} --gpg-sign=${TEST_GPG_KEYID_1}"
-    echo "1..10"
+    echo "1..12"
 else
     # Only one test don't need GPG support
     echo "1..1"
@@ -53,6 +53,8 @@ ostree_repo_init repo --mode=archive
 ${CMD_PREFIX} ostree --repo=repo remote add --set=gpg-verify=false origin $(cat httpd-address)/ostree/gnomerepo
 ${CMD_PREFIX} ostree --repo=repo pull --mirror origin
 assert_has_file repo/summary
+assert_has_file repo/summary.idx
+assert_has_file repo/summaries/*.summary
 ${CMD_PREFIX} ostree --repo=repo checkout -U main main-copy
 assert_file_has_content main-copy/baz/cow "moo"
 ${CMD_PREFIX} ostree --repo=repo checkout -U other other-copy
@@ -80,61 +82,113 @@ repo_reinit () {
 
 cd ${test_tmpdir}
 repo_reinit
-${OSTREE} --repo=repo pull origin main
+${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
 assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
 
 rm repo/tmp/cache/summaries/origin
-${OSTREE} --repo=repo pull origin main
+${OSTREE} --repo=repo pull  --disable-indexed-summaries origin main
 assert_has_file repo/tmp/cache/summaries/origin
 
-echo "ok pull with signed summary"
+echo "ok pull with signed summary w/o indexes"
+
+cd ${test_tmpdir}
+repo_reinit
+${OSTREE} --repo=repo pull origin main
+assert_has_file repo/tmp/cache/summaries/origin.idx
+assert_has_file repo/tmp/cache/summaries/origin-*.summary
+
+rm repo/tmp/cache/summaries/origin*.summary
+${OSTREE} --repo=repo pull origin main
+assert_has_file repo/tmp/cache/summaries/origin-*.summary
+
+echo "ok pull with signed summary w/ indexes"
+
+${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
+${OSTREE} --repo=repo pull origin main
 
 touch repo/tmp/cache/summaries/foo
 touch repo/tmp/cache/summaries/foo.sig
+touch repo/tmp/cache/summaries/foo.idx
+touch repo/tmp/cache/summaries/foo-5ffb979fc6d9b539cf9804a8afd00092c63f0e49659956ca119a058771694e2c.summary
 ${OSTREE} --repo=repo prune
 assert_not_has_file repo/tmp/cache/summaries/foo
 assert_not_has_file repo/tmp/cache/summaries/foo.sig
+assert_not_has_file repo/tmp/cache/summaries/foo.idx
+assert_not_has_file repo/tmp/cache/summaries/foo-5ffb979fc6d9b539cf9804a8afd00092c63f0e49659956ca119a058771694e2c.summary
 assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
+assert_has_file repo/tmp/cache/summaries/origin.idx
+assert_has_file repo/tmp/cache/summaries/origin-*.summary
 echo "ok prune summary cache"
 
 cd ${test_tmpdir}
 repo_reinit
 mkdir cachedir
-${OSTREE} --repo=repo pull --cache-dir=cachedir origin main
+${OSTREE} --repo=repo pull --disable-indexed-summaries --cache-dir=cachedir origin main
 assert_not_has_file repo/tmp/cache/summaries/origin
 assert_not_has_file repo/tmp/cache/summaries/origin.sig
 assert_has_file cachedir/summaries/origin
 assert_has_file cachedir/summaries/origin.sig
 
 rm cachedir/summaries/origin
-${OSTREE} --repo=repo pull --cache-dir=cachedir origin main
+${OSTREE} --repo=repo pull --disable-indexed-summaries --cache-dir=cachedir origin main
 assert_not_has_file repo/tmp/cache/summaries/origin
 assert_has_file cachedir/summaries/origin
 
-echo "ok pull with signed summary and cachedir"
+rm -rf cachedir
+
+echo "ok pull with signed summary and cachedir w/o indexes"
+
+cd ${test_tmpdir}
+repo_reinit
+mkdir cachedir
+${OSTREE} --repo=repo pull --cache-dir=cachedir origin main
+assert_not_has_file repo/tmp/cache/summaries/origin.idx
+assert_not_has_file repo/tmp/cache/summaries/origin-*.summary
+assert_has_file cachedir/summaries/origin.idx
+assert_has_file cachedir/summaries/origin-*.summary
+
+rm cachedir/summaries/origin-*.summary
+${OSTREE} --repo=repo pull --cache-dir=cachedir origin main
+assert_not_has_file repo/tmp/cache/summaries/origin-*.summary
+assert_has_file cachedir/summaries/origin-*.summary
+
+echo "ok pull with signed summary and cachedir w/ indexes"
 
 cd ${test_tmpdir}
 repo_reinit
 mv ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{,.good}
 echo invalid > ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig
+mv ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{,.good}
+echo invalid > ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig
 if ${OSTREE} --repo=repo pull origin main 2>err.txt; then
+    assert_not_reached "Successful pull with invalid GPG sig"
+fi
+if ${OSTREE} --repo=repo pull --disable-indexed-summaries origin main 2>err.txt; then
     assert_not_reached "Successful pull with invalid GPG sig"
 fi
 assert_file_has_content err.txt "no signatures found"
 mv ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{.good,}
+mv ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{.good,}
 echo "ok pull with invalid summary gpg signature fails"
 
 cd ${test_tmpdir}
 repo_reinit
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary{,.good}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx{,.good}
 # Some leading garbage
 (echo invalid && cat ${test_tmpdir}/ostree-srv/gnomerepo/summary) > summary.bad.tmp && mv summary.bad.tmp ${test_tmpdir}/ostree-srv/gnomerepo/summary
+(echo invalid && cat ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx) > summary.idx.bad.tmp && mv summary.idx.bad.tmp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx
+
 if ${OSTREE} --repo=repo pull origin main; then
     assert_not_reached "Successful pull with invalid summary"
 fi
+if ${OSTREE} --repo=repo pull --disable-indexed-summaries origin main; then
+    assert_not_reached "Successful pull with invalid summary"
+fi
 mv ${test_tmpdir}/ostree-srv/gnomerepo/summary{.good,}
+mv ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx{.good,}
 echo "ok pull with invalid summary (leading garbage) fails"
 
 # Generate a delta
@@ -144,6 +198,8 @@ ${OSTREE} --repo=${test_tmpdir}/ostree-srv/gnomerepo summary -u ${COMMIT_SIGN}
 cd ${test_tmpdir}
 repo_reinit
 ${OSTREE} --repo=repo pull origin main
+repo_reinit
+${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
 echo "ok pull delta with signed summary"
 
 # Verify 'ostree remote summary' output.
@@ -163,6 +219,10 @@ assert_file_has_content static-deltas.txt \
 ${OSTREE} --repo=${test_tmpdir}/ostree-srv/gnomerepo summary -u ${COMMIT_SIGN}
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary{,.1}
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{,.1}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx{,.1}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{,.1}
+SUMMARY1=$(basename ${test_tmpdir}/ostree-srv/gnomerepo/summaries/*.summary .summary)
+
 mkdir ${test_tmpdir}/ostree-srv/even-another-files
 cd ${test_tmpdir}/ostree-srv/even-another-files
 echo 'hello world even another object' > even-another-hello-world
@@ -170,23 +230,35 @@ ${OSTREE} --repo=${test_tmpdir}/ostree-srv/gnomerepo commit ${COMMIT_SIGN} -b ev
 ${OSTREE} --repo=${test_tmpdir}/ostree-srv/gnomerepo summary -u ${COMMIT_SIGN}
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary{,.2}
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{,.2}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx{,.2}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{,.2}
+mv ${test_tmpdir}/ostree-srv/gnomerepo/summaries/${SUMMARY1}.summary{,.tmp}
+SUMMARY2=$(basename ${test_tmpdir}/ostree-srv/gnomerepo/summaries/*.summary .summary)
+mv ${test_tmpdir}/ostree-srv/gnomerepo/summaries/${SUMMARY1}.summary{.tmp,}
 cd ${test_tmpdir}
 
 # Reset to the old valid summary and pull to cache it
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary{.1,}
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{.1,}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx{.1,}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{.1,}
+
 repo_reinit
+${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
 ${OSTREE} --repo=repo pull origin main
 assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
+assert_has_file repo/tmp/cache/summaries/origin.idx
+assert_has_file repo/tmp/cache/summaries/origin-${SUMMARY1}.summary
 cmp repo/tmp/cache/summaries/origin ${test_tmpdir}/ostree-srv/gnomerepo/summary.1 >&2
 cmp repo/tmp/cache/summaries/origin.sig ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig.1 >&2
+cmp repo/tmp/cache/summaries/origin-${SUMMARY1}.summary ${test_tmpdir}/ostree-srv/gnomerepo/summaries/${SUMMARY1}.summary >&2
 
 # Simulate a pull race where the client gets the old summary and the new
 # summary signature since it was generated on the server between the
 # requests
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{.2,}
-if ${OSTREE} --repo=repo pull origin main 2>err.txt; then
+if ${OSTREE} --repo=repo pull  --disable-indexed-summaries origin main 2>err.txt; then
     assert_not_reached "Successful pull with old summary"
 fi
 assert_file_has_content err.txt "BAD signature"
@@ -197,30 +269,52 @@ cmp repo/tmp/cache/summaries/origin.sig ${test_tmpdir}/ostree-srv/gnomerepo/summ
 
 # Publish correct summary and check that subsequent pull succeeds
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary{.2,}
-${OSTREE} --repo=repo pull origin main
+${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
 assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
 cmp repo/tmp/cache/summaries/origin ${test_tmpdir}/ostree-srv/gnomerepo/summary.2 >&2
 cmp repo/tmp/cache/summaries/origin.sig ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig.2 >&2
+
+# In the indexed case we need to also drop the cache, because unless the actual index changed we will not re-read the raced-with sig
+rm -rf repo/tmp/cache/summaries/origin.idx
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{.2,}
+if ${OSTREE} --repo=repo pull origin main 2>err.txt; then
+    assert_not_reached "Successful pull with old summary"
+fi
+assert_file_has_content err.txt "BAD signature"
+
+# Publish correct summary and check that subsequent pull succeeds
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx{.2,}
+${OSTREE} --repo=repo pull origin main
+assert_has_file repo/tmp/cache/summaries/origin.idx
+assert_has_file repo/tmp/cache/summaries/origin-${SUMMARY2}.summary
+cmp repo/tmp/cache/summaries/origin-${SUMMARY2}.summary ${test_tmpdir}/ostree-srv/gnomerepo/summaries/${SUMMARY2}.summary >&2
 
 echo "ok pull with signed summary remote old summary"
 
 # Reset to the old valid summary and pull to cache it
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary{.1,}
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{.1,}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx{.1,}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{.1,}
 repo_reinit
+${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
 ${OSTREE} --repo=repo pull origin main
 assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
+assert_has_file repo/tmp/cache/summaries/origin.idx
+assert_has_file repo/tmp/cache/summaries/origin-${SUMMARY1}.summary
 cmp repo/tmp/cache/summaries/origin ${test_tmpdir}/ostree-srv/gnomerepo/summary.1 >&2
 cmp repo/tmp/cache/summaries/origin.sig ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig.1 >&2
+cmp repo/tmp/cache/summaries/origin-${SUMMARY1}.summary ${test_tmpdir}/ostree-srv/gnomerepo/summaries/${SUMMARY1}.summary >&2
+
 
 # Simulate a pull race where the client gets the new summary and the old
 # summary signature. This is unlikely to happen except if the web server
 # is caching the old signature. This should succeed because the cached
 # old summary is used.
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary{.2,}
-${OSTREE} --repo=repo pull origin main
+${OSTREE} --repo=repo pull  --disable-indexed-summaries origin main
 assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
 cmp repo/tmp/cache/summaries/origin ${test_tmpdir}/ostree-srv/gnomerepo/summary.1 >&2
@@ -228,23 +322,42 @@ cmp repo/tmp/cache/summaries/origin.sig ${test_tmpdir}/ostree-srv/gnomerepo/summ
 
 # Publish correct signature and check that subsequent pull succeeds
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{.2,}
-${OSTREE} --repo=repo pull origin main
+${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
 assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
 cmp repo/tmp/cache/summaries/origin ${test_tmpdir}/ostree-srv/gnomerepo/summary.2 >&2
 cmp repo/tmp/cache/summaries/origin.sig ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig.2 >&2
+
+# same with indexes, however here we get a transient error since we're keying the update on the actual index file
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx{.2,}
+if ${OSTREE} --repo=repo pull origin main 2>err.txt; then
+    assert_not_reached "Successful pull with old signature"
+fi
+assert_file_has_content err.txt "BAD signature"
+
+# Publish correct signature and check that subsequent pull succeeds
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{.2,}
+${OSTREE} --repo=repo pull origin main
+assert_has_file repo/tmp/cache/summaries/origin.idx
+assert_has_file repo/tmp/cache/summaries/origin-${SUMMARY2}.summary
 
 echo "ok pull with signed summary remote old summary signature"
 
 # Reset to the old valid summary and pull to cache it
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary{.1,}
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{.1,}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx{.1,}
+cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{.1,}
 repo_reinit
+${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
 ${OSTREE} --repo=repo pull origin main
 assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
+assert_has_file repo/tmp/cache/summaries/origin.idx
+assert_has_file repo/tmp/cache/summaries/origin-${SUMMARY1}.summary
 cmp repo/tmp/cache/summaries/origin ${test_tmpdir}/ostree-srv/gnomerepo/summary.1 >&2
 cmp repo/tmp/cache/summaries/origin.sig ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig.1 >&2
+cmp repo/tmp/cache/summaries/origin-${SUMMARY1}.summary ${test_tmpdir}/ostree-srv/gnomerepo/summaries/${SUMMARY1}.summary >&2
 
 # Simulate a broken summary cache to see if it can be recovered from.
 # Prior to commit c4c2b5eb the client would save the summary to the
@@ -256,7 +369,7 @@ cmp repo/tmp/cache/summaries/origin.sig ${test_tmpdir}/ostree-srv/gnomerepo/summ
 # invalid cache is detected. Then pull again to check if it can be
 # recovered from.
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.2 repo/tmp/cache/summaries/origin
-if OSTREE_REPO_TEST_ERROR=invalid-cache ${OSTREE} --repo=repo pull origin main 2>err.txt; then
+if OSTREE_REPO_TEST_ERROR=invalid-cache ${OSTREE} --repo=repo pull --disable-indexed-summaries origin main 2>err.txt; then
     assert_not_reached "Should have hit OSTREE_REPO_TEST_ERROR_INVALID_CACHE"
 fi
 assert_file_has_content err.txt "OSTREE_REPO_TEST_ERROR_INVALID_CACHE"
@@ -264,7 +377,7 @@ assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
 cmp repo/tmp/cache/summaries/origin ${test_tmpdir}/ostree-srv/gnomerepo/summary.2 >&2
 cmp repo/tmp/cache/summaries/origin.sig ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig.1 >&2
-${OSTREE} --repo=repo pull origin main
+${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
 assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
 cmp repo/tmp/cache/summaries/origin ${test_tmpdir}/ostree-srv/gnomerepo/summary.1 >&2
@@ -273,7 +386,7 @@ cmp repo/tmp/cache/summaries/origin.sig ${test_tmpdir}/ostree-srv/gnomerepo/summ
 # Publish new signature and check that subsequent pull succeeds
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary{.2,}
 cp ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{.2,}
-${OSTREE} --repo=repo pull origin main
+${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
 assert_has_file repo/tmp/cache/summaries/origin
 assert_has_file repo/tmp/cache/summaries/origin.sig
 cmp repo/tmp/cache/summaries/origin ${test_tmpdir}/ostree-srv/gnomerepo/summary.2 >&2

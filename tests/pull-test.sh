@@ -630,7 +630,11 @@ cd ${test_tmpdir}
 repo_init --no-sign-verify
 mv ostree-srv/gnomerepo/refs/heads/main{,.orig}
 rm ostree-srv/gnomerepo/summary
+rm ostree-srv/gnomerepo/summary.idx
 (for x in $(seq 20); do echo "lots of html here "; done) > ostree-srv/gnomerepo/refs/heads/main
+if ${CMD_PREFIX} ostree --repo=repo pull --disable-indexed-summaries origin main 2>err.txt; then
+    fatal "pull of invalid ref succeeded"
+fi
 if ${CMD_PREFIX} ostree --repo=repo pull origin main 2>err.txt; then
     fatal "pull of invalid ref succeeded"
 fi

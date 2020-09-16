@@ -117,35 +117,49 @@ do
     cd ${test_tmpdir}
     repo_reinit --set=verification-${engine}-key=${PUBLIC_KEY}
     ${OSTREE} --repo=repo pull origin main
+    assert_has_file repo/tmp/cache/summaries/origin.idx
+
+    ${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
     assert_has_file repo/tmp/cache/summaries/origin
     assert_has_file repo/tmp/cache/summaries/origin.sig
 
     rm repo/tmp/cache/summaries/origin
-    ${OSTREE} --repo=repo pull origin main
+    ${OSTREE} --repo=repo pull --disable-indexed-summaries origin main
     assert_has_file repo/tmp/cache/summaries/origin
 
     echo "ok ${engine} pull with signed summary"
 
     touch repo/tmp/cache/summaries/foo
     touch repo/tmp/cache/summaries/foo.sig
+    touch repo/tmp/cache/summaries/foo.idx
+    touch repo/tmp/cache/summaries/foo-5ffb979fc6d9b539cf9804a8afd00092c63f0e49659956ca119a058771694e2c.summary
     ${OSTREE} --repo=repo prune
     assert_not_has_file repo/tmp/cache/summaries/foo
     assert_not_has_file repo/tmp/cache/summaries/foo.sig
+    assert_not_has_file repo/tmp/cache/summaries/foo.idx
+    assert_not_has_file repo/tmp/cache/summaries/foo-5ffb979fc6d9b539cf9804a8afd00092c63f0e49659956ca119a058771694e2c.summary
     assert_has_file repo/tmp/cache/summaries/origin
     assert_has_file repo/tmp/cache/summaries/origin.sig
+    assert_has_file repo/tmp/cache/summaries/origin.idx
+    assert_has_file repo/tmp/cache/summaries/origin-*.summary
     echo "ok ${engine} prune summary cache"
 
     cd ${test_tmpdir}
     repo_reinit --set=verification-${engine}-key=${PUBLIC_KEY}
     mkdir cachedir
+
     ${OSTREE} --repo=repo pull --cache-dir=cachedir origin main
+    assert_not_has_file repo/tmp/cache/summaries/origin.idx
+    assert_has_file cachedir/summaries/origin.idx
+
+    ${OSTREE} --repo=repo pull --disable-indexed-summaries --cache-dir=cachedir origin main
     assert_not_has_file repo/tmp/cache/summaries/origin
     assert_not_has_file repo/tmp/cache/summaries/origin.sig
     assert_has_file cachedir/summaries/origin
     assert_has_file cachedir/summaries/origin.sig
 
     rm cachedir/summaries/origin
-    ${OSTREE} --repo=repo pull --cache-dir=cachedir origin main
+    ${OSTREE} --repo=repo pull --disable-indexed-summaries --cache-dir=cachedir origin main
     assert_not_has_file repo/tmp/cache/summaries/origin
     assert_has_file cachedir/summaries/origin
 
@@ -153,9 +167,18 @@ do
 
     cd ${test_tmpdir}
     repo_reinit --set=verification-${engine}-key=${PUBLIC_KEY}
-    mv ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{,.good}
+
+    mv ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{,.good}
     echo invalid > ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig
     if ${OSTREE} --repo=repo pull origin main 2>err.txt; then
+        assert_not_reached "Successful pull with invalid ${engine} signature"
+    fi
+    assert_file_has_content err.txt "no summary signatures found"
+    mv ${test_tmpdir}/ostree-srv/gnomerepo/summary.idx.sig{.good,}
+
+    mv ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig{,.good}
+    echo invalid > ${test_tmpdir}/ostree-srv/gnomerepo/summary.sig
+    if ${OSTREE} --repo=repo pull --disable-indexed-summaries origin main 2>err.txt; then
         assert_not_reached "Successful pull with invalid ${engine} signature"
     fi
     assert_file_has_content err.txt "No signatures found"

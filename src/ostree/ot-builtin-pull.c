@@ -35,6 +35,7 @@ static gboolean opt_commit_only;
 static gboolean opt_dry_run;
 static gboolean opt_disable_static_deltas;
 static gboolean opt_require_static_deltas;
+static gboolean opt_disable_indexed_summaries;
 static gboolean opt_untrusted;
 static gboolean opt_http_trusted;
 static gboolean opt_timestamp_check;
@@ -62,6 +63,7 @@ static GOptionEntry options[] = {
    { "per-object-fsync", 0, 0, G_OPTION_ARG_NONE, &opt_per_object_fsync, "Perform writes in such a way that avoids stalling concurrent processes", NULL },
    { "disable-static-deltas", 0, 0, G_OPTION_ARG_NONE, &opt_disable_static_deltas, "Do not use static deltas", NULL },
    { "require-static-deltas", 0, 0, G_OPTION_ARG_NONE, &opt_require_static_deltas, "Require static deltas", NULL },
+   { "disable-indexed-summaries", 0, 0, G_OPTION_ARG_NONE, &opt_disable_indexed_summaries, "Do not use indexed summaries", NULL },
    { "mirror", 0, 0, G_OPTION_ARG_NONE, &opt_mirror, "Write refs suitable for a mirror and fetches all refs if none provided", NULL },
    { "subpath", 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &opt_subpaths, "Only pull the provided subpath(s)", NULL },
    { "untrusted", 0, 0, G_OPTION_ARG_NONE, &opt_untrusted, "Verify checksums of local sources (always enabled for HTTP pulls)", NULL },
@@ -311,6 +313,9 @@ ostree_builtin_pull (int argc, char **argv, OstreeCommandInvocation *invocation,
 
     g_variant_builder_add (&builder, "{s@v}", "require-static-deltas",
                            g_variant_new_variant (g_variant_new_boolean (opt_require_static_deltas)));
+
+    g_variant_builder_add (&builder, "{s@v}", "disable-indexed-summaries",
+                           g_variant_new_variant (g_variant_new_boolean (opt_disable_indexed_summaries)));
 
     g_variant_builder_add (&builder, "{s@v}", "dry-run",
                            g_variant_new_variant (g_variant_new_boolean (opt_dry_run)));

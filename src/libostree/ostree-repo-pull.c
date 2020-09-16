@@ -201,6 +201,7 @@ static gboolean _ostree_repo_remote_fetch_indexed_summary (OstreeRepo       *sel
                                                            GVariant         *index_sig,
                                                            GBytes          **out_summary,
                                                            GBytes          **out_signatures,
+                                                           char            **out_summary_csum,
                                                            guint64          *out_last_modified,
                                                            GCancellable     *cancellable,
                                                            GError          **error);
@@ -3550,13 +3551,17 @@ initiate_request (OtPullData                 *pull_data,
 static gboolean
 pull_fetch_summary (OstreeRepo   *self,
                     const char   *remote_name,
-                    const char    *subset,
+                    const char   *subset,
+                    gboolean      disable_indexed,
                     OtPullData   *pull_data,
                     GVariant     *opt_summary_bytes_v,
                     GVariant     *opt_summary_sig_bytes_v,
                     GBytes       *metalink_bytes_summary,
                     GBytes      **out_bytes_summary,
                     GBytes      **out_bytes_sig,
+                    char        **out_summary_csum,
+                    GVariant    **out_summary_idx,
+                    GVariant    **out_summary_idx_sig,
                     GCancellable *cancellable,
                     GError      **error)
 {
@@ -3568,6 +3573,11 @@ pull_fetch_summary (OstreeRepo   *self,
   OstreeFetcherURI *metalink_url = NULL; /* We're not using metalink other than as a mirrorlist source in the pull case */
   gboolean disable_cache;
   gboolean res;
+
+  if (out_summary_idx != NULL)
+    *out_summary_idx = NULL;
+  if (out_summary_idx_sig != NULL)
+    *out_summary_idx_sig = NULL;
 
   if (opt_summary_sig_bytes_v)
     {
@@ -3620,7 +3630,46 @@ pull_fetch_summary (OstreeRepo   *self,
     }
 
   /* disable cache for repo source being a local filesystem  */
-  disable_cache = pull_data->remote_repo_local != NULL;
+  disable_cache = pull_data->remote_repo_local != NULL || remote_name == NULL;
+
+  if (!disable_indexed)
+    {
+      /* First look for index to see if the remote supports indexed summaries */
+      if (!repo_remote_fetch_summary_index (self, remote_name,
+                                            metalink_url,
+                                            pull_data->gpg_verify_summary,
+                                            pull_data->signapi_summary_verifiers,
+                                            pull_data->fetcher,
+                                            pull_data->meta_mirrorlist,
+                                            pull_data->n_network_retries,
+                                            disable_cache,
+                                            &summary_idx, &summary_idx_sig,
+                                            cancellable, error))
+        return FALSE;
+
+      if (summary_idx)
+        {
+          g_autofree char *summary_csum = NULL;
+
+          if (!_ostree_repo_remote_fetch_indexed_summary (self, remote_name, subset,
+                                                          metalink_url,
+                                                          pull_data->gpg_verify_summary, pull_data->signapi_summary_verifiers,
+                                                          pull_data->fetcher, pull_data->meta_mirrorlist,
+                                                          pull_data->n_network_retries,
+                                                          disable_cache,
+                                                          summary_idx, summary_idx_sig,
+                                                          &bytes_summary, &bytes_sig, &summary_csum, NULL,
+                                                          cancellable, error))
+            return FALSE;
+
+          ot_transfer_out_value (out_bytes_summary, &bytes_summary);
+          ot_transfer_out_value (out_bytes_sig, &bytes_sig);
+          ot_transfer_out_value (out_summary_csum, &summary_csum);
+          ot_transfer_out_value (out_summary_idx, &summary_idx);
+          ot_transfer_out_value (out_summary_idx_sig, &summary_idx_sig);
+          return TRUE;
+        }
+    }
 
   res = _ostree_repo_remote_fetch_non_indexed_summary (self, remote_name, subset,
                                                        metalink_url,
@@ -3726,6 +3775,8 @@ ostree_repo_pull_with_options (OstreeRepo             *self,
   gboolean ret = FALSE;
   g_autoptr(GBytes) bytes_summary = NULL;
   g_autoptr(GBytes) bytes_sig = NULL;
+  g_autoptr(GBytes) compat_bytes_summary = NULL;
+  g_autoptr(GBytes) compat_bytes_sig = NULL;
   g_autofree char *metalink_url_str = NULL;
   g_autoptr(OstreeFetcherURI) metalink_uri = NULL;
   g_autoptr(GHashTable) requested_refs_to_fetch = NULL;  /* (element-type OstreeCollectionRef utf8) */
@@ -3754,6 +3805,7 @@ ostree_repo_pull_with_options (OstreeRepo             *self,
   gboolean opt_ref_keyring_map_set = FALSE;
   gboolean disable_sign_verify = FALSE;
   gboolean disable_sign_verify_summary = FALSE;
+  gboolean disable_indexed_summaries = FALSE;
   const char *main_collection_id = NULL;
   const char *url_override = NULL;
   gboolean inherit_transaction = FALSE;
@@ -3764,6 +3816,9 @@ ostree_repo_pull_with_options (OstreeRepo             *self,
   g_autoptr(GVariantIter) ref_keyring_map_iter = NULL;
   g_autoptr(GVariant) opt_summary_bytes_v = NULL;
   g_autoptr(GVariant) opt_summary_sig_bytes_v = NULL;
+  g_autoptr(GVariant) summary_idx = NULL;
+  g_autoptr(GVariant) summary_idx_sig = NULL;
+  g_autofree char *summary_csum = NULL;
   /* If refs or collection-refs has exactly one value, this will point to that
    * value, otherwise NULL. Used for logging.
    */
@@ -3812,6 +3867,7 @@ ostree_repo_pull_with_options (OstreeRepo             *self,
 	g_variant_lookup (options, "ref-keyring-map", "a(sss)", &ref_keyring_map_iter);
       (void) g_variant_lookup (options, "summary-bytes", "@ay", &opt_summary_bytes_v);
       (void) g_variant_lookup (options, "summary-sig-bytes", "@ay", &opt_summary_sig_bytes_v);
+      (void) g_variant_lookup (options, "disable-indexed-summaries", "b", &disable_indexed_summaries);
 
       if (pull_data->remote_refspec_name != NULL)
         pull_data->remote_name = g_strdup (pull_data->remote_refspec_name);
@@ -4214,9 +4270,9 @@ ostree_repo_pull_with_options (OstreeRepo             *self,
 
   pull_data->static_delta_superblocks = g_ptr_array_new_with_free_func ((GDestroyNotify)g_variant_unref);
 
-  if (!pull_fetch_summary (self, pull_data->remote_name, NULL, pull_data,
+  if (!pull_fetch_summary (self, pull_data->remote_name, NULL, disable_indexed_summaries, pull_data,
                            opt_summary_bytes_v, opt_summary_sig_bytes_v, metalink_bytes_summary,
-                           &bytes_summary, &bytes_sig, cancellable, error))
+                           &bytes_summary, &bytes_sig, &summary_csum, &summary_idx, &summary_idx_sig, cancellable, error))
     goto out;
 
   if (bytes_summary)
@@ -4323,6 +4379,35 @@ ostree_repo_pull_with_options (OstreeRepo             *self,
           goto out;
         }
 
+      if (summary_idx != NULL)
+        {
+          g_assert (summary_csum != NULL);
+
+          /* The pulled summary was indexed, but we need to mirror the fallback too. */
+
+          if (!pull_fetch_summary (self, pull_data->remote_name, NULL, TRUE, pull_data,
+                                   NULL, NULL, NULL,
+                                   &compat_bytes_summary, &compat_bytes_sig, NULL, NULL, NULL,
+                                   cancellable, error))
+            goto out;
+
+          if (compat_bytes_summary == NULL)
+            {
+              g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                           "Fetching all refs was requested in mirror mode, but remote repository does not have a fallback summary");
+              goto out;
+            }
+        }
+      else
+        {
+          g_assert (summary_csum == NULL);
+
+          /* The pulled summary was not-indexed, cache it as compat. */
+
+          compat_bytes_summary = g_bytes_ref (bytes_summary);
+          if (bytes_sig)
+            compat_bytes_sig = g_bytes_ref (bytes_sig);
+        }
     }
   else if (opt_collection_refs_set)
     {
@@ -4612,17 +4697,48 @@ ostree_repo_pull_with_options (OstreeRepo             *self,
       GLnxFileReplaceFlags replaceflag =
         pull_data->repo->disable_fsync ? GLNX_FILE_REPLACE_NODATASYNC : 0;
       gsize len;
-      const guint8 *buf = g_bytes_get_data (pull_data->summary_data, &len);
+      const guint8 *buf = g_bytes_get_data (compat_bytes_summary, &len);
 
       if (!glnx_file_replace_contents_at (pull_data->repo->repo_dir_fd, "summary",
                                           buf, len, replaceflag,
                                           cancellable, error))
         goto out;
 
-      if (pull_data->summary_data_sig)
+      if (compat_bytes_sig)
         {
-          buf = g_bytes_get_data (pull_data->summary_data_sig, &len);
+          buf = g_bytes_get_data (compat_bytes_sig, &len);
           if (!glnx_file_replace_contents_at (pull_data->repo->repo_dir_fd, "summary.sig",
+                                              buf, len, replaceflag,
+                                              cancellable, error))
+            goto out;
+        }
+
+      if (summary_idx)
+        {
+          const char *subset_path = glnx_strjoina ("summaries/", summary_csum, ".summary");
+
+          buf = g_variant_get_data (summary_idx);
+          len = g_variant_get_size (summary_idx);
+          if (!glnx_file_replace_contents_at (pull_data->repo->repo_dir_fd, "summary.idx",
+                                              buf, len, replaceflag,
+                                              cancellable, error))
+            goto out;
+
+          if (!glnx_shutil_mkdir_p_at (self->repo_dir_fd, "summaries", DEFAULT_DIRECTORY_MODE, cancellable, error))
+            goto out;
+
+          buf = g_bytes_get_data (bytes_summary, &len);
+          if (!glnx_file_replace_contents_at (pull_data->repo->repo_dir_fd, subset_path,
+                                              buf, len, replaceflag,
+                                              cancellable, error))
+            goto out;
+        }
+
+      if (summary_idx_sig)
+        {
+          buf = g_variant_get_data (summary_idx_sig);
+          len = g_variant_get_size (summary_idx_sig);
+          if (!glnx_file_replace_contents_at (pull_data->repo->repo_dir_fd, "summary.idx.sig",
                                               buf, len, replaceflag,
                                               cancellable, error))
             goto out;
@@ -6518,6 +6634,7 @@ _ostree_repo_remote_fetch_indexed_summary (OstreeRepo       *self,
                                            GVariant         *index_sig,
                                            GBytes          **out_summary,
                                            GBytes          **out_signatures,
+                                           char            **out_summary_csum,
                                            guint64          *out_last_modified,
                                            GCancellable     *cancellable,
                                            GError          **error)
@@ -6600,6 +6717,9 @@ _ostree_repo_remote_fetch_indexed_summary (OstreeRepo       *self,
 
   if (out_signatures != NULL)
     *out_signatures = g_steal_pointer (&subset_signatures);
+
+  if (out_summary_csum != NULL)
+    *out_summary_csum = g_steal_pointer (&summary_csum);
 
   if (out_last_modified != NULL)
     {
@@ -6857,7 +6977,7 @@ _ostree_repo_remote_fetch_summary (OstreeRepo    *self,
                                                           gpg_verify_summary, signapi_summary_verifiers,
                                                           fetcher, mirrorlist, n_network_retries, FALSE,
                                                           index, index_sig,
-                                                          out_summary, out_signatures, out_last_modified,
+                                                          out_summary, out_signatures, NULL, out_last_modified,
                                                           cancellable, error);
 
       /* No index, fall back */
@@ -6994,6 +7114,7 @@ ostree_repo_pull_from_remotes_finish (OstreeRepo    *self,
  *   means return errors without retrying
  * - max-supported-version (u): Don't return summary file with a higher format version than this.
  * - subset (s): The subset to download the summary for, "" means no subset
+ * - disable-indexed-summaries (b): Disable use of indexed summaries
  *
  * Returns: %TRUE on success, %FALSE on failure
  *
