@@ -150,31 +150,35 @@ _ostree_repo_prune_tmp (OstreeRepo *self,
 
   while (TRUE)
     {
-      size_t len;
-      gboolean has_sig_suffix = FALSE;
       struct dirent *dent;
-      g_autofree gchar *d_name = NULL;
+      const char *d_name;
+      g_autofree gchar *remote_name = NULL;
 
       if (!glnx_dirfd_iterator_next_dent (&dfd_iter, &dent, cancellable, error))
         return FALSE;
       if (dent == NULL)
         break;
 
+      d_name = dent->d_name;
+
       /* dirent->d_name can't be modified directly; see `man 3 readdir` */
-      d_name = g_strdup (dent->d_name);
-      len = strlen (d_name);
-      if (len > 4 && g_strcmp0 (d_name + len - 4, ".sig") == 0)
+      if (g_str_has_suffix (d_name, ".sig") ||
+          g_str_has_suffix (d_name, ".idx"))
         {
-          has_sig_suffix = TRUE;
-          d_name[len - 4] = '\0';
+          remote_name = g_strndup (d_name, strlen (d_name) - 4);
+        }
+      else
+        {
+          char *dash = strchr (d_name, '-');
+
+          if (dash != NULL && g_str_has_suffix (d_name, ".summary"))
+            remote_name = g_strndup (d_name, dash - d_name);
+          else
+            remote_name = g_strdup (d_name);
         }
 
-      if (!g_hash_table_contains (self->remotes, d_name))
+      if (remote_name == NULL || !g_hash_table_contains (self->remotes, remote_name))
         {
-          /* Restore the previous value to get the file name.  */
-          if (has_sig_suffix)
-            d_name[len - 4] = '.';
-
           if (!glnx_unlinkat (dfd_iter.fd, d_name, 0, error))
             return FALSE;
         }
