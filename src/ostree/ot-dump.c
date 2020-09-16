@@ -233,7 +233,8 @@ dump_summary_ref (const char   *collection_id,
       g_autofree gchar *value_str = NULL;
       const gchar *pretty_key = NULL;
 
-      if (g_strcmp0 (key, OSTREE_COMMIT_TIMESTAMP) == 0)
+      if (g_strcmp0 (key, OSTREE_COMMIT_TIMESTAMP) == 0 ||
+          g_strcmp0 (key, OSTREE_COMMIT_TIMESTAMP2) == 0)
         {
           pretty_key = "Timestamp";
           value_str = uint64_secs_to_iso8601 (GUINT64_FROM_BE (g_variant_get_uint64 (value)));

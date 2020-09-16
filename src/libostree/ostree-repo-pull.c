@@ -5352,7 +5352,8 @@ find_remotes_process_refs (OstreeRepo                        *self,
         stored_commit_v = NULL;
 
       /* Check the additional metadata. */
-      if (!g_variant_lookup (commit_metadata_v, OSTREE_COMMIT_TIMESTAMP, "t", &commit_timestamp))
+      if (!g_variant_lookup (commit_metadata_v, OSTREE_COMMIT_TIMESTAMP2, "t", &commit_timestamp) &&
+          !g_variant_lookup (commit_metadata_v, OSTREE_COMMIT_TIMESTAMP, "t", &commit_timestamp))
         commit_timestamp = 0;  /* unknown */
       else
         commit_timestamp = GUINT64_FROM_BE (commit_timestamp);

@@ -60,8 +60,15 @@ G_BEGIN_DECLS
 #define _OSTREE_PAYLOAD_LINK_PREFIX_LEN (sizeof (_OSTREE_PAYLOAD_LINK_PREFIX) - 1)
 
 /* Well-known keys for the additional metadata field in a commit in a ref entry
- * in a summary file. */
+ * in a summary file.
+ *
+ * Ideally these should be <= 7 chars long (not including termination) as anything
+ * longer than that will cause the 8 byte alignment for the v in a{sv} to shift things to the next
+ * boundary. These are repeated for every ref in the summary, so it is worth being frugal with space.
+ */
 #define OSTREE_COMMIT_TIMESTAMP "ostree.commit.timestamp"
+/* Use this in new summaries instead to avoid wasting space per ref */
+#define OSTREE_COMMIT_TIMESTAMP2 "ot.cts"
 
 typedef enum {
   OSTREE_REPO_TEST_ERROR_PRE_COMMIT = (1 << 0),

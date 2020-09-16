@@ -5674,6 +5674,7 @@ summary_add_ref_entry (OstreeRepo               *self,
                        const char               *ref,
                        const char               *checksum,
                        GVariantBuilder          *refs_builder,
+                       gboolean                  new_commit_timestamp_key,
                        OstreeAddMetadataCallback metadata_callback,
                        gpointer                  user_data,
                        GError                  **error)
@@ -5701,7 +5702,7 @@ summary_add_ref_entry (OstreeRepo               *self,
   g_autoptr(GDateTime) dt = g_date_time_new_from_unix_utc (commit_timestamp);
 
   if (dt != NULL)
-    g_variant_dict_insert_value (&commit_metadata_builder, OSTREE_COMMIT_TIMESTAMP,
+    g_variant_dict_insert_value (&commit_metadata_builder, new_commit_timestamp_key ? OSTREE_COMMIT_TIMESTAMP2 : OSTREE_COMMIT_TIMESTAMP,
                                  g_variant_new_uint64 (GUINT64_TO_BE (commit_timestamp)));
 
   if (metadata_callback != NULL &&
@@ -5723,6 +5724,7 @@ static GVariant *
 generate_summary (OstreeRepo               *self,
                   GVariant                 *additional_metadata,
                   gboolean                  include_deltas,
+                  gboolean                  new_commit_timestamp_key,
                   OstreeAddMetadataCallback metadata_callback,
                   gpointer                  user_data,
                   GCancellable             *cancellable,
@@ -5749,7 +5751,7 @@ generate_summary (OstreeRepo               *self,
             const char *ref = iter->data;
             const char *commit = g_hash_table_lookup (refs, ref);
 
-            if (!summary_add_ref_entry (self, NULL, ref, commit, refs_builder, metadata_callback, user_data, error))
+            if (!summary_add_ref_entry (self, NULL, ref, commit, refs_builder, new_commit_timestamp_key, metadata_callback, user_data, error))
               return NULL;
           }
       }
@@ -5852,7 +5854,7 @@ generate_summary (OstreeRepo               *self,
             const char *commit = g_hash_table_lookup (ref_map, ref);
             GVariantBuilder *builder = is_main_collection_id ? refs_builder : collection_refs_builder;
 
-            if (!summary_add_ref_entry (self, collection_id, ref, commit, builder, metadata_callback, user_data, error))
+            if (!summary_add_ref_entry (self, collection_id, ref, commit, builder, new_commit_timestamp_key, metadata_callback, user_data, error))
               return NULL;
 
             if (!is_main_collection_id)
@@ -5925,6 +5927,9 @@ generate_summary (OstreeRepo               *self,
  *   * `no-deltas-in-summary` (`b`): Don't add delta index to summary, saving space.
  *     Client version 2020.7 or later will use the delta index instead, older versions
  *     will not use deltas.
+ *   * `new-commit-timestamp-key` (`b`): Use a new, shorter key name for the commit
+ *     timestamps in the per-ref metadata, saving space.
+ *     Client versions before 2020.7 will not support reading this key.
  *
  * Locking: exclusive
  *
@@ -5947,6 +5952,7 @@ ostree_repo_regenerate_summary_with_options (OstreeRepo               *self,
    */
   g_autoptr(OstreeRepoAutoLock) lock = NULL;
   gboolean no_deltas_in_summary = FALSE;
+  gboolean new_commit_timestamp_key = FALSE;
 
   if (!ot_keyfile_get_boolean_with_default (self->config, "core",
                                             "no-deltas-in-summary", FALSE,
@@ -5956,6 +5962,8 @@ ostree_repo_regenerate_summary_with_options (OstreeRepo               *self,
   if (options)
     {
       (void)g_variant_lookup (options, "no-deltas-in-summary", "b", &no_deltas_in_summary);
+      (void)g_variant_lookup (options, "new-commit-timestamp-key", "b", &new_commit_timestamp_key);
+
     }
 
   lock = _ostree_repo_auto_lock_push (self, OSTREE_REPO_LOCK_EXCLUSIVE,
@@ -5966,6 +5974,7 @@ ostree_repo_regenerate_summary_with_options (OstreeRepo               *self,
 
   g_autoptr(GVariant) summary = generate_summary (self, additional_metadata,
                                                   !no_deltas_in_summary,
+                                                  new_commit_timestamp_key,
                                                   metadata_callback, user_data,
                                                   cancellable, error);
   if (summary == NULL)
