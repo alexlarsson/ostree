@@ -26,6 +26,8 @@
 #include "ostree-core-private.h"
 #include "ostree-repo-file.h"
 #include "ostree-repo-private.h"
+#include "ostree-sign.h"
+#include "ostree-autocleanups.h"
 
 #ifdef HAVE_COMPOSEFS
 #include <libcomposefs/lcfs-writer.h>
@@ -611,4 +613,50 @@ ostree_repo_commit_add_composefs_metadata (OstreeRepo *self, guint format_versio
 #else
   return composefs_not_supported (error);
 #endif
+}
+
+/**
+ * ostree_composefs_sign_metadata:
+ * @dict: A GVariant builder of type a{sv}
+ * @secret_key: ed25519 secret key to use
+ * @cancellable: Cancellable
+ * @error: Error
+ *
+ * After ostree_repo_commit_add_composefs_metadata() has added the
+ * composefs digest to the metadata dict, this can be called to add
+ * an ed25519 signature to the digest. This signature will be written
+ * out during deploy and can be verified at boot.
+ */
+_OSTREE_PUBLIC
+gboolean
+ostree_composefs_sign_metadata (GVariantDict *dict, GVariant *secret_key,
+                                GCancellable *cancellable, GError **error)
+{
+  g_autoptr (GVariant) digest = NULL;
+  g_autoptr (GBytes) digest_bytes = NULL;
+  g_autoptr (GBytes) signature = NULL;
+  g_autoptr (OstreeSign) sign = NULL;
+
+  digest = g_variant_dict_lookup_value (dict, OSTREE_COMPOSEFS_DIGEST_KEY_V0, G_VARIANT_TYPE_BYTESTRING);
+  if (digest == NULL)
+    {
+      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED, "No composefs digest in metadata to sign");
+      return FALSE;
+    }
+
+  sign = ostree_sign_get_by_name (OSTREE_SIGN_NAME_ED25519, error);
+  if (sign == NULL)
+    return FALSE;
+
+  if (!ostree_sign_set_sk (sign, secret_key, error))
+    return FALSE;
+
+  digest_bytes = g_variant_get_data_as_bytes (digest);
+  if (!ostree_sign_data (sign, digest_bytes, &signature, cancellable, error))
+    return glnx_prefix_error (error, "Not able to sign the composefs digest");
+
+  g_variant_dict_insert_value (dict, OSTREE_COMPOSEFS_SIGN_KEY_V0,
+                               ot_gvariant_new_ay_bytes (signature));
+
+  return TRUE;
 }

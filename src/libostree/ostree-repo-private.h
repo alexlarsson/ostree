@@ -69,6 +69,7 @@ G_BEGIN_DECLS
 #define OSTREE_COMPOSEFS_META_PREFIX "ostree.composefs"
 // The fs-verity digest of the composefs, version 0
 #define OSTREE_COMPOSEFS_DIGEST_KEY_V0 OSTREE_COMPOSEFS_META_PREFIX ".digest.v0"
+#define OSTREE_COMPOSEFS_SIGN_KEY_V0 OSTREE_COMPOSEFS_META_PREFIX ".sign.v0"
 
 #define _OSTREE_INTEGRITY_SECTION "ex-integrity"
 

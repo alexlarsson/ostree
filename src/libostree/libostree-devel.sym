@@ -29,3 +29,8 @@ global:
   someostree_symbol_deleteme;
 } LIBOSTREE_2021.$LASTSTABLE;
 */
+
+LIBOSTREE_2023.6 {
+global:
+  ostree_composefs_sign_metadata;
+} LIBOSTREE_2023.4;

@@ -661,6 +661,8 @@ checkout_deployment_tree (OstreeSysroot *sysroot, OstreeRepo *repo, OstreeDeploy
       g_autoptr (GVariant) metadata = g_variant_get_child_value (commit_variant, 0);
       g_autoptr (GVariant) metadata_composefs = g_variant_lookup_value (
           metadata, OSTREE_COMPOSEFS_DIGEST_KEY_V0, G_VARIANT_TYPE_BYTESTRING);
+      g_autoptr (GVariant) metadata_composefs_sig = g_variant_lookup_value (
+          metadata, OSTREE_COMPOSEFS_SIGN_KEY_V0, G_VARIANT_TYPE_BYTESTRING);
 
       /* Create a composefs image and put in deploy dir as .ostree.cfs */
       g_autoptr (OstreeComposefsTarget) target = ostree_composefs_target_new ();
@@ -696,6 +698,18 @@ checkout_deployment_tree (OstreeSysroot *sysroot, OstreeRepo *repo, OstreeDeploy
       if (!glnx_link_tmpfile_at (&tmpf, GLNX_LINK_TMPFILE_REPLACE, osdeploy_dfd, composefs_cfs_path,
                                  error))
         return FALSE;
+
+      if (metadata_composefs && metadata_composefs_sig)
+        {
+          g_autofree char *composefs_sig_path
+            = g_strdup_printf ("%s/.ostree.cfs.sig", checkout_target_name);
+          g_autoptr (GBytes) sig = g_variant_get_data_as_bytes (metadata_composefs_sig);
+
+          if (!glnx_file_replace_contents_at (osdeploy_dfd, composefs_sig_path,
+                                              g_bytes_get_data (sig, NULL), g_bytes_get_size (sig),
+                                              0, cancellable, error))
+            return FALSE;
+        }
 
       /* This is where the erofs image will be temporarily mounted */
       g_autofree char *composefs_mnt_path

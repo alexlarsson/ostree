@@ -70,9 +70,15 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifdef HAVE_LIBSODIUM
+#include <sodium.h>
+#endif
+
 /* We can't include both linux/fs.h and sys/mount.h, so define these directly */
 #define FS_VERITY_FL 0x00100000 /* Verity protected inode */
 #define FS_IOC_GETFLAGS _IOR ('f', 1, long)
+
+#define SHA256_DIGEST_LEN (32)
 
 // The name of the composefs metadata root
 #define OSTREE_COMPOSEFS_NAME ".ostree.cfs"
@@ -167,6 +173,8 @@ main (int argc, char *argv[])
 
   const char *root_arg = NULL;
   bool we_mounted_proc = false;
+  g_autoptr (GError) error = NULL;
+
   if (argc < 2)
     err (EXIT_FAILURE, "usage: ostree-prepare-root SYSROOT");
   root_arg = argv[1];
@@ -270,9 +278,54 @@ main (int argc, char *argv[])
         objdirs,
         1,
       };
+      glnx_autofd int cfs_fd = -1;
+
+      cfs_fd = open (OSTREE_COMPOSEFS_NAME, O_RDONLY | O_CLOEXEC);
+      if (cfs_fd == -1)
+        {
+#ifdef USE_LIBSYSTEMD
+          sd_journal_send ("MESSAGE=Failed to open '%s': %s", OSTREE_COMPOSEFS_NAME, strerror (errno), NULL);
+#endif
+          goto nocomposefs;
+        }
 
       if (composefs_mode == OSTREE_COMPOSEFS_MODE_SIGNED)
-        errx (EXIT_FAILURE, "composefs signature not supported");
+        {
+          const char *pubkey_path = "/etc/ostree/composefs.pub";
+          char buf[sizeof (struct fsverity_digest) + SHA256_DIGEST_LEN];
+          struct fsverity_digest *d = (struct fsverity_digest *)&buf;
+          g_autofree char *pubkey;
+          gsize pubkey_size;
+          g_autofree char *sig;
+          gsize sig_size;
+
+          if (!g_file_get_contents (OSTREE_COMPOSEFS_NAME ".sig", &sig, &sig_size, &error))
+            err (EXIT_FAILURE, "failed to load '%s': %s", OSTREE_COMPOSEFS_NAME ".sig", error->message);
+
+          if (sig_size != crypto_core_ed25519_HASHBYTES)
+            err (EXIT_FAILURE, "Invalid signature file '%s'", OSTREE_COMPOSEFS_NAME ".sig");
+
+          if (!g_file_get_contents (pubkey_path, &pubkey, &pubkey_size, &error))
+            err (EXIT_FAILURE, "failed to load '%s': %s", pubkey_path, error->message);
+
+          d->digest_size = SHA256_DIGEST_LEN;
+          if (ioctl (cfs_fd, FS_IOC_MEASURE_VERITY, d) < 0)
+            err (EXIT_FAILURE, "Failed to get fs-verity digest for '%s'", OSTREE_COMPOSEFS_NAME);
+
+          if (d->digest_size != SHA256_DIGEST_LEN ||
+              d->digest_algorithm != FS_VERITY_HASH_ALG_SHA256)
+            err (EXIT_FAILURE, "Invalid fs-verity digest type for '%s'", OSTREE_COMPOSEFS_NAME);
+
+#ifdef HAVE_LIBSODIUM
+          if (sodium_init () < 0)
+            err (EXIT_FAILURE, "Failed to init libsodiume");
+
+          if (crypto_sign_verify_detached ((unsigned char *)sig, d->digest, d->digest_size, (unsigned char *)pubkey) != 0)
+            err (EXIT_FAILURE, "Mismatched signature for composefs image");
+#else
+          err (EXIT_FAILURE, "libsodiume missin, signatures not supported")
+#endif
+        }
 
       cfs_options.flags = LCFS_MOUNT_FLAGS_READONLY;
 
@@ -318,6 +371,7 @@ main (int argc, char *argv[])
             sd_journal_send ("MESSAGE=Mounting composefs image failed: %s", strerror (errno), NULL);
 #endif
         }
+    nocomposefs:
 #else
       err (EXIT_FAILURE, "Composefs not supported");
 #endif

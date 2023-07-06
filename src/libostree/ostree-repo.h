@@ -694,6 +694,9 @@ _OSTREE_PUBLIC
 gboolean ostree_repo_commit_add_composefs_metadata (OstreeRepo *self, guint format_version,
                                                     GVariantDict *dict, OstreeRepoFile *repo_root,
                                                     GCancellable *cancellable, GError **error);
+_OSTREE_PUBLIC
+gboolean ostree_composefs_sign_metadata (GVariantDict *dict, GVariant *secret_key,
+                                         GCancellable *cancellable, GError **error);
 
 _OSTREE_PUBLIC
 gboolean ostree_repo_write_commit (OstreeRepo *self, const char *parent, const char *subject,

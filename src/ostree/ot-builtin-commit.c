@@ -71,6 +71,7 @@ static char **opt_key_ids;
 static char *opt_sign_name;
 static gboolean opt_generate_sizes;
 static gboolean opt_composefs_metadata;
+static char *opt_composefs_key_path;
 static gboolean opt_disable_fsync;
 static char *opt_timestamp;
 
@@ -164,6 +165,8 @@ static GOptionEntry options[] = {
     "Generate size information along with commit metadata", NULL },
   { "generate-composefs-metadata", 0, 0, G_OPTION_ARG_NONE, &opt_composefs_metadata,
     "Generate composefs commit metadata", NULL },
+  { "sign-composefs", 0, 0, G_OPTION_ARG_STRING, &opt_composefs_key_path,
+    "Sign the composefs digest. Implies --generate-composefs-metadata", "PATH" },
   { "disable-fsync", 0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE, &opt_disable_fsync,
     "Do not invoke fsync()", NULL },
   { "fsync", 0, 0, G_OPTION_ARG_CALLBACK, parse_fsync_cb, "Specify how to invoke fsync()",
@@ -875,7 +878,7 @@ ostree_builtin_commit (int argc, char **argv, OstreeCommandInvocation *invocatio
           metadata = g_variant_ref_sink (g_variant_dict_end (&bootmeta));
         }
 
-      if (opt_composefs_metadata)
+      if (opt_composefs_metadata || opt_composefs_key_path)
         {
           g_autoptr (GVariant) old_metadata = g_steal_pointer (&metadata);
           g_auto (GVariantDict) newmeta;
@@ -883,6 +886,22 @@ ostree_builtin_commit (int argc, char **argv, OstreeCommandInvocation *invocatio
           if (!ostree_repo_commit_add_composefs_metadata (
                   repo, 0, &newmeta, OSTREE_REPO_FILE (root), cancellable, error))
             goto out;
+
+          if (opt_composefs_key_path)
+            {
+              g_autofree char *key_data;
+              gsize key_size;
+
+              if (!g_file_get_contents (opt_composefs_key_path, &key_data, &key_size, error))
+                {
+                  glnx_prefix_error (error, "Failed to open '%s'", opt_composefs_key_path);
+                  goto out;
+                }
+
+              g_autoptr (GVariant) secret_key = ot_gvariant_new_bytearray ((guchar *)key_data, key_size);
+              if (!ostree_composefs_sign_metadata (&newmeta,secret_key, cancellable, error))
+                goto out;
+            }
 
           metadata = g_variant_ref_sink (g_variant_dict_end (&newmeta));
         }
