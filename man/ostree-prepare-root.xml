@@ -114,6 +114,13 @@ License along with this library. If not, see <https://www.gnu.org/licenses/>.
                 <listitem><para>A boolean value; the default is false.  If this is set to <literal>true</literal>, then the <literal>/sysroot</literal> mount point is mounted read-only.</para></listitem>
           </varlistentry>
         </variablelist>
+
+        <variablelist>
+            <varlistentry>
+                <term><varname>sysroot.etc</varname></term>
+                <listitem><para>A string value; the default is persitent.  If this is set to <literal>transient</literal>, then the <literal>/sysroot</literal> mount point is mounted transiently i.e. a non-persistent location.</para></listitem>
+          </varlistentry>
+        </variablelist>
     </refsect1>
 
 
